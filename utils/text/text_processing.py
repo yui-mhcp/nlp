@@ -1,0 +1,343 @@
+
+# Copyright (C) 2022 yui-mhcp project's author. All rights reserved.
+# Licenced under the Affero GPL v3 Licence (the "Licence").
+# you may not use this file except in compliance with the License.
+# See the "LICENCE" file at the root of the directory for the licence information.
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import re
+import collections
+import numpy as np
+import tensorflow as tf
+
+from utils.sequence_utils import pad_batch
+from utils.text.cleaners import collapse_whitespace, remove_tokens, remove_punctuation, lowercase
+
+_max_length = 150
+
+_eos_chars = ('...', '.', ' ?', ' !', '?', '!')
+
+def _normalize_text_f1(text, exclude = []):
+    return collapse_whitespace(remove_tokens(remove_punctuation(lowercase(text)), exclude)).strip()
+
+def bytes_to_unicode():
+    # Copyright 2018 The Open AI Team Authors and The HuggingFace Inc. team.
+    #
+    # Licensed under the Apache License, Version 2.0 (the "License");
+    # you may not use this file except in compliance with the License.
+    # You may obtain a copy of the License at
+    #
+    #     http://www.apache.org/licenses/LICENSE-2.0
+    #
+    # Unless required by applicable law or agreed to in writing, software
+    # distributed under the License is distributed on an "AS IS" BASIS,
+    # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    # See the License for the specific language governing permissions and
+    # limitations under the License.
+
+    """
+    Returns list of utf-8 byte and a mapping to unicode strings. We specifically avoids mapping to whitespace/control
+    characters the bpe code barfs on.
+    The reversible bpe codes work on unicode strings. This means you need a large # of unicode characters in your vocab
+    if you want to avoid UNKs. When you're at something like a 10B token dataset you end up needing around 5K for
+    decent coverage. This is a significant percentage of your normal, say, 32K bpe vocab. To avoid that, we want lookup
+    tables between utf-8 bytes and unicode strings.
+    """
+    bs = (
+        list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+    )
+    cs = bs[:]
+    n = 0
+    for b in range(2 ** 8):
+        if b not in bs:
+            bs.append(b)
+            cs.append(2 ** 8 + n)
+            n += 1
+    cs = [chr(n) for n in cs]
+    return dict(zip(bs, cs))
+
+def get_pairs(text, n = 2):
+    """ Creates a n-gram """
+    return [tuple(text[i : i + n]) for i in range(0, len(text) - n + 1)]
+
+def bpe(token, bpe_ranks):
+    word = tuple(token)
+    pairs = get_pairs(word)
+    
+    if not pairs: return token
+    
+    while True:
+        bigram = min(pairs, key = lambda pair: bpe_ranks.get(pair, float('inf')))
+        
+        if bigram not in bpe_ranks: break
+        
+        first, second = bigram
+        new_word = []
+        i = 0
+        while i < len(word):
+            try:
+                j = word.index(first, i)
+            except ValueError:
+                new_word.extend(word[i:])
+                break
+            else:
+                new_word.extend(word[i:j])
+                i = j
+            
+            if word[i] == first and i < len(word) - 1 and word[i + 1] == second:
+                new_word.append(first + second)
+                i += 2
+            else:
+                new_word.append(word[i])
+                i += 1
+        new_word = tuple(new_word)
+        word = new_word
+        if len(word) == 1: break
+        else: pairs = get_pairs(word)
+    return word
+
+def exact_match(y_true, y_pred):
+    return int(y_true == y_pred)
+
+def f1_score(y_true, y_pred, normalize = True, exclude = None, as_matrix = False):
+    """
+        Compute F1-score
+        
+        Arguments :
+            - y_true    : ground truth (target)
+            - y_pred    : prediction (hypothesis)
+            - normalize : whether to normalize or not (lowercase + remove spaces)
+            - exclude   : list of token to exclude (not take into account)
+        Return :
+            - if `y_true` and `y_pred` are str : [EM, F1, precision, recall]
+            - if `y_true` or `y_pred` is a list (not nested) :
+                - if `as_matrix` is False : [n, 4] (n = len(y_true) = len(y_pred))
+                - else : [len(y_true), len(y_pred), 4]
+            - if `y_true` or `y_pred` is a nested list : np.ndarray of shape [N, n_true, n_pred, 4]
+                - N = len(y_true) = len(y_pred)
+                - n1 = max(len(y_true_i))
+                - n2 = max(len(y_pred_i))
+                
+    """
+    def _is_nested_list(data):
+        if isinstance(data, (list, tuple)) and len(data) > 0 and isinstance(data[0], (list, tuple)):
+            return True
+        return False
+    
+    def _normalize(data):
+        if isinstance(data, tf.Tensor): data = data.numpy()
+        if isinstance(data, bytes):     data = data.decode('utf-8')
+        if isinstance(data, np.ndarray):    data = data.tolist()
+        if isinstance(data, (list, tuple)) and isinstance(data[0], int):
+            data = ' '.join([str(d) for d in data])
+        return data
+    
+    y_true  = _normalize(y_true)
+    y_pred  = _normalize(y_pred)
+    
+    if _is_nested_list(y_true) or _is_nested_list(y_pred):
+        if not _is_nested_list(y_true): y_true = [[yi] for yi in y_true]
+        if not _is_nested_list(y_pred): y_pred = [[yi] for yi in y_pred]
+    
+        return pad_batch([
+            f1_score(y_true_i, y_pred_i, normalize = normalize, exclude = exclude, as_matrix = True)
+            for y_true_i, y_pred_i in zip(y_true, y_pred)
+        ], pad_value = -1., dtype = np.float32)
+    elif isinstance(y_true, (list, tuple)) and isinstance(y_pred, (list, tuple)):
+        if not as_matrix:
+            assert len(y_true) == len(y_pred), "Lengths are {} and {}".format(len(y_true), len(y_pred))
+            return np.array([
+                f1_score(y_true_i, y_pred_i, normalize = normalize, exclude = exclude)
+                for y_true_i, y_pred_i in zip(y_true, y_pred)
+            ])
+        return np.array([
+            f1_score(y_true_i, y_pred, normalize = normalize, exclude = exclude) for y_true_i in y_true
+        ])
+    elif isinstance(y_true, (list, tuple)):
+        return np.array([
+            f1_score(y_true_i, y_pred, normalize = normalize, exclude = exclude) for y_true_i in y_true
+        ])
+    elif isinstance(y_pred, (list, tuple)):
+        return np.array([
+            f1_score(y_true, y_pred_i, normalize = normalize, exclude = exclude) for y_pred_i in y_pred
+        ])
+    
+    if exclude: exclude = _normalize(exclude)
+    
+    if normalize:
+        y_true = _normalize_text_f1(y_true, exclude)
+        y_pred = _normalize_text_f1(y_pred, exclude)
+    elif exclude:
+        y_true = collapse_whitespace(remove_tokens(y_true, exclude))
+        y_pred = collapse_whitespace(remove_tokens(y_pred, exclude))
+    
+    true_tokens = y_true.split()
+    pred_tokens = y_pred.split()
+    
+    common = collections.Counter(true_tokens) & collections.Counter(pred_tokens)
+    nb_same = sum(common.values())
+
+    em = exact_match(y_true, y_pred)
+
+    if len(true_tokens) == 0 or len(pred_tokens) == 0:
+        f1 = int(true_tokens == pred_tokens)
+        return em, f1, f1, f1
+    elif nb_same == 0:
+        return 0, 0, 0, 0
+    
+    precision = 1. * nb_same / len(pred_tokens)
+    recall    = 1. * nb_same / len(true_tokens)
+    f1 = (2 * precision * recall) / (precision + recall)
+    
+    return em, f1, precision, recall
+
+def create_padding_mask(seq, seq_len = None, pad_value = 0, maxlen = None, dtype = tf.float32):
+    """
+        Return padding mask matching attention shape [batch_size, 1, 1, seq_len]
+    """
+    if seq_len is None:
+        mask = tf.cast(tf.math.equal(seq, pad_value), dtype = dtype)
+    else:
+        if maxlen is None: maxlen = tf.shape(seq)[1]
+        mask = 1. - tf.sequence_mask(
+            seq_len, maxlen = maxlen, dtype = dtype
+        )
+    return tf.reshape(mask, [tf.shape(seq)[0], 1, 1, -1])
+
+def create_look_ahead_mask(batch_size, size, dtype = tf.float32):
+    """ Creates a `look ahead` mask with shape [batch_size, 1, size, size] """
+    mask = 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
+    mask = tf.tile(tf.reshape(mask, [1, 1, size, size]), [batch_size, 1, 1, 1])
+    
+    return tf.cast(mask, dtype = dtype)
+
+def create_combined_mask(target, seq_len, pad_value = 0):
+    look_ahead_mask = create_look_ahead_mask(tf.shape(target)[0], tf.shape(target)[1])
+    padding_mask    = create_padding_mask(
+        target, seq_len = seq_len, pad_value = pad_value, dtype = look_ahead_mask.dtype
+    )
+    
+    return tf.maximum(look_ahead_mask, padding_mask)
+    
+def extract_sentence(text, pattern):
+    pattern = pattern.lower()
+    return [sent for sent in split_sentence(text) if pattern in sent.lower()]
+
+def split_sentence(text):
+    patterns = [pat + ' ' for pat in _eos_chars]
+    return [
+        part.strip() + end_char for part, end_char in multi_split(text, * patterns)
+        if len(part.strip()) > 0
+    ]
+
+def split_and_join(text, pattern):
+    splitted = text.split(pattern)
+    for i in reversed(range(1, len(splitted))):
+        splitted.insert(i, pattern)
+    return splitted
+        
+def multi_split(text, * separators):
+    """
+        Split `text` based on multiple separators and returns a list of tuple (sub_text, sep)
+        Note that the last part is a tuple with an empty `sep` and a possibly empty `sub_text` (depending if `text` ends with a separator or not)
+    """
+    result = [(text, '')]
+    for sep in separators:
+        if sep not in text: continue
+        
+        new_result = []
+        for text, end_c in result:
+            parts = text.split(sep)
+            for sub_part in parts[:-1]:
+                new_result.append((sub_part, sep))
+            new_result.append((parts[-1], end_c))
+        result = new_result
+    return result
+    
+def simple_text_split(text, max_length = _max_length):
+    """
+        Split a text (word based) such that each part have at most 'max_length' caracters
+    """
+    mots = text.split(" ")
+
+    text_parts = []
+    length, parts = 0, []
+    for mot in mots:
+        parts.append(mot)
+        length += len(mot)
+
+        if length >= max_length:
+            text_parts.append(" ".join(parts))
+            length, parts = 0, []
+    if length > 0: text_parts.append(" ".join(parts))
+    
+    return text_parts
+
+def split_text(text, max_length = _max_length):
+    """
+        Split a text such that each parts have at most 'max_length' caracters. 
+        The split is based on different criteria : 
+        1) Split based on sentence ('_eos_chars' used as delimiters)
+        2) If sentences are longer than 'max_length', split them based on comma
+        3) If parts are still too long, split them on words
+    """
+    if isinstance(text, list):
+        return [split_text(t, max_length) for t in text]
+    
+    text = text.replace('\n', ' ').strip()
+    if len(text) == 0: return []
+    elif len(text) <= max_length: return [text]
+    
+    if text[-1] in _eos_chars: text += ' '
+
+    parts = []
+    for part, end_char in multi_split(text, * _eos_chars):
+        part = part.strip()
+        # Skip empty parts
+        if len(part) == 0: continue
+        
+        if len(part) <= max_length:
+            # If part <= max_length, directly add it
+            if len(parts) == 0 or len(parts[-1]) + len(part) > max_length:
+                parts.append(part + end_char)
+            else:
+                parts[-1] += ' ' + part + end_char
+                
+        elif ', ' in part:
+            # If part is longer but contains comma, split it based on commas
+            splitted_part = part.split(", ")
+            for i, sub_part in enumerate(splitted_part):
+                sub_part = sub_part.strip()
+                
+                end_sub_part = end_char if i == len(splitted_part) -1 else ","
+                if len(sub_part) <= max_length:
+                    if len(parts) == 0 or len(parts[-1]) + len(sub_part) > max_length:
+                        parts.append(sub_part + end_sub_part)
+                    else:
+                        parts[-1] += ' ' + sub_part + end_sub_part
+                else:
+                    sub_splitted = simple_text_split(sub_part, max_length)
+                    sub_splitted[-1] += end_sub_part
+                    for sub in sub_splitted:
+                        sub = sub.strip()
+                        if len(parts) == 0 or len(parts[-1]) + len(sub) > max_length:
+                            parts.append(sub)
+                        else:
+                            parts[-1] += ' ' + sub
+        else:
+            splitted_part = simple_text_split(part, max_length)
+            splitted_part[-1] += end_char
+            for sub_part in splitted_part:
+                sub_part = sub_part.strip()
+                if len(parts) == 0 or len(parts[-1]) + len(sub_part) > max_length:
+                    parts.append(sub_part)
+                else:
+                    parts[-1] += ' ' + sub_part
+    
+    return [p for p in parts if len(p) > 0]
+
