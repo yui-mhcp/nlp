@@ -68,6 +68,7 @@ class F1(tf.keras.metrics.Metric):
     
     def update_state(self, y_true, y_pred, sample_weight = None):
         if isinstance(y_true, (list, tuple)): y_true = y_true[0]
+        if hasattr(y_pred, 'tokens'): y_pred = y_pred.tokens
         
         if len(tf.shape(y_true)) == 1: y_true = tf.expand_dims(y_true, 0)
         if len(tf.shape(y_pred)) == 1: y_pred = tf.expand_dims(y_pred, 0)

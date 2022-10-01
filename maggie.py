@@ -1,3 +1,14 @@
+# Copyright (C) 2022 Quentin L. & yui-mhcp project's author. All rights reserved.
+# Licenced under the Affero GPL v3 Licence (the "Licence").
+# you may not use this file except in compliance with the License.
+# See the "LICENCE" file at the root of the directory for the licence information.
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 import logging
 import discord
@@ -6,8 +17,11 @@ import numpy as np
 from threading import Lock
 
 from loggers import set_level
+from models import get_pretrained
 from utils import load_json, dump_json, var_from_str
-from models.qa import MAG, _pretrained, answer_from_web
+from models.qa import _pretrained, answer_from_web
+
+logger = logging.getLogger(__name__)
 
 set_level('info')
 
@@ -36,8 +50,8 @@ _evaluations    = {
     'quality'   : '**Quality** for Q&A {} \n1 = poor\n3 = correct but not detailed\n5 = well detailed'
 }
 
-URL_GIT         = 'https://github.com/Ananas120/mag'
-URL_REPORT      = ''
+URL_GIT         = 'https://github.com/yui-mhcp/nlp'
+URL_REPORT      = '?'
 HELP_MESSAGE    = """
 **MAGgie** is a Q&A bot created for the @Mew Master thesis (which is about Q&A models in Deep Learning).
 
@@ -49,12 +63,11 @@ Commands :
     .report     : get the master thesis' report URL (overleaf)
     .show_model : show model informations
     .ask <question> [OPTIONS]   : ask a question to the bot
-        --old_model : use the previous model to predict
         --add_url   : add used urls
         --length_power=<float>      : (value between [0, 1]), encourage longer answers
         --length_temperature=<float>    : (-1 or [0 ... 1]), encourage diversity
         --n         : specifies the number of sites to use (default 5)
-        --max_negatives : defines the number of paragraphs to use (default to the model's maximum)
+        --max_input_texts   : defines the number of paragraphs to use (default to the model's maximum)
     .results    : show statistics on reactions
     .get_url <q_id>     : get used URL for the given question
     .evaluate       : show a random asked question for evaluation
@@ -161,31 +174,29 @@ def format_answer(answer, add_url = False, n_passages = 1, max_passage_length = 
     passages = {}
     
     _confidence = ''
-    if 'highest_attention_score' in  answer:
+    if 'highest_attention_score' in  answer.get('attention_infos', {}):
         _confidence = '(confidence : {:.2f}) '.format(
-            answer['highest_attention_score']
+            answer['attention_infos']['highest_attention_score']
         )
     des += "\nCandidates {}:\n".format(_confidence)
     for i, cand in enumerate(answer['candidates']):
         
-        des += "- **#{} (score : {:.3f}) : {}**\n".format(
-            i + 1, cand['score'], cand['text']
+        des += "- **#{}{} : {}**\n".format(
+            i + 1, ' (log-score : {:.3f})'.format(cand['score']) if 'score' in cand else '', cand['text']
         )
         
-        if len(cand.get('passages', [])) > 0 and n_passages > 0:
+        spans = cand.get('attention_infos', {}).get('spans')
+        if len(spans)> 0 and n_passages > 0:
             done = 0
             
             des += "  Passages :\n"
-            for j, sent in enumerate(cand.get('passages', [])):
+            for j, (sent, score, _) in enumerate(spans):
                 if sent in passages: continue
                 if done >= n_passages: break
                 done += 1
                 passages[sent] = True
-                _score = ''
-                if 'attention_infos' in answer:
-                    span = answer['attention_infos']['spans'][j]
-                des += "  -  #{}{} : {}\n".format(
-                    j, _score, sent if len(sent) < max_passage_length else (sent[:max_passage_length] + ' [...]')
+                des += "  -  #{} (attn score {:.3f}) : {}\n".format(
+                    j, score, sent if len(sent) < max_passage_length else (sent[:max_passage_length] + ' [...]')
                 )
         des += "\n"
     
@@ -211,9 +222,9 @@ class Maggie(discord.Client):
         self.mutex_react    = Lock()
         
         os.makedirs(self.responses_directory, exist_ok = True)
-        
-        _ = MAG(nom = self.model)
     
+        get_pretrained(self.model)
+
     @property
     def responses_directory(self):
         return os.path.join(self.directory, 'responses')
@@ -227,7 +238,7 @@ class Maggie(discord.Client):
         return self.user.id
     
     async def on_ready(self):
-        logging.info("{} with ID {} started !".format(self.user_name, self.user_id))
+        logger.info("{} with ID {} started !".format(self.user_name, self.user_id))
     
     async def on_message(self, context):
         if not (len(context.content) > 0 and context.content[0] in ('.', '!')): return
@@ -235,7 +246,7 @@ class Maggie(discord.Client):
         infos = context.content[1:].split()
         command, msg = infos[0], ' '.join(infos[1:])
         
-        logging.info('Get command {}'.format(command))
+        logger.info('Get command {}'.format(command))
         
         if not hasattr(self, command):
             await ctx.channel.send('Unknown command : {}\nUse .help for help ;)'.format(command))
@@ -257,7 +268,7 @@ class Maggie(discord.Client):
             
             data.setdefault(eval_type, {})
             if user_id not in data[eval_type].get(score, []):
-                logging.info('User {} adds score {} for type {} on question ID {} !'.format(
+                logger.info('User {} adds score {} for type {} on question ID {} !'.format(
                     user_id, score, eval_type, q_id
                 ))
                 data[eval_type].setdefault(score, []).append(user_id)
@@ -279,14 +290,14 @@ class Maggie(discord.Client):
             
             data.setdefault(eval_type, {})
             if user_id in data[eval_type].get(score, []):
-                logging.info('User {} removes score {} for type {} on question ID {} !'.format(
+                logger.info('User {} removes score {} for type {} on question ID {} !'.format(
                     user_id, score, eval_type, q_id
                 ))
                 data[eval_type][score].remove(user_id)
                 
                 dump_json(filename, data, indent = 4)
             else:
-                logging.error('User {} has no reaction {} for {} on question {}'.format(
+                logger.error('User {} has no reaction {} for {} on question {}'.format(
                     user_id, score, eval_type, q_id
                 ))
 
@@ -307,8 +318,7 @@ class Maggie(discord.Client):
         )
 
     async def show_model(self, msg, context):
-        model = MAG(nom = self.model)
-        await context.channel.send(str(model))
+        await context.channel.send(str(get_pretrained(self.model)))
     
     async def get_url(self, msg, context):
         if msg + '.json' not in os.listdir(self.responses_directory):
@@ -334,16 +344,19 @@ class Maggie(discord.Client):
         question = ' '.join(words)
         
         add_url = config.pop('add_url', False)
-        model = self.model if not config.pop('old_model', False) else ORIGINAL_MODEL
+        
         with self.mutex:
-            logging.info('Question {} from user {} with config {} !'.format(
+            logger.info('Question {} from user {} with config {} !'.format(
                 question, context.author, config
             ))
-            answer  = answer_from_web(question, model = model, run_eagerly = True, ** config)[0]
+            answer  = answer_from_web(
+                question, model = self.model, save = False, analyze_attention = True,
+                max_workers = -2, ** config
+            )[0]
         
         result = await context.channel.send(format_answer(answer, add_url = add_url))
         q_id = result.id
-        logging.info("Question ID : {}".format(q_id))
+        logger.info("Question ID : {}".format(q_id))
         
         for eval_type, msg in _evaluations.items():
             answer.setdefault(eval_type, {})
@@ -382,7 +395,7 @@ class Maggie(discord.Client):
 
     
     async def results(self, msg, context):
-        res = get_results('memoire_results/maggie/responses')
+        res = get_results(self.responses_directory)
 
         des = ''
         for model, model_infos in res.items():
@@ -403,7 +416,7 @@ class Maggie(discord.Client):
                         des += ' {:.2f} average score ({} evaluated)'.format(np.mean(vals), len(vals))
         des = des[2:]
         await context.channel.send(des)
-        
+    
     async def add_default_emojis(self, ctx, add_false = False):
         for k, emoji in _emojis.items():
             if not add_false and k == '0': continue
@@ -428,18 +441,18 @@ class Maggie(discord.Client):
     
     def get_filename(self, q_id):
         return os.path.join(self.responses_directory, '{}.json'.format(q_id))
-    
+
 
 if __name__ == '__main__':
     token = os.environ.get('DISCORD_BOT_TOKEN', None)
 
     if token is None:
-        raise ValueError('You should give the discord bot token as `DISCORD_BOT_TOKEN` env variable !')
+        raise ValueError('You must give the discord bot token as `DISCORD_BOT_TOKEN` env variable !')
 
     intents = discord.Intents.default()
 
     bot = Maggie(
-        directory = 'memoire_results/maggie', intents = intents,
-        allowed_config = ['length_power', 'length_temperature', 'n', 'max_negatives', 'old_model']
+        directory = 'maggie', intents = intents,
+        allowed_config = ['length_power', 'length_temperature', 'n', 'max_input_texts']
     )
     bot.run(token)

@@ -1,4 +1,4 @@
-# Copyright (C) 2022 Quentin L. & yui-mhcp project's author. All rights reserved.
+# Copyright (C) 2022 yui-mhcp project's author. All rights reserved.
 # Licenced under the Affero GPL v3 Licence (the "Licence").
 # you may not use this file except in compliance with the License.
 # See the "LICENCE" file at the root of the directory for the licence information.
@@ -9,16 +9,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from models.nlu.nlu_utils import *
+from models.nlu.base_nlu_model import BaseNLUModel
 from models.nlu.base_nlu_generator import BaseNLUGenerator
 
-class QuestionGenerator(BaseNLUGenerator):
-    def __init__(self,
-                 * args,
-                 input_format   = ['{answer}', '{context}'],
-                 output_format  = '{question}',
-                 ** kwargs
-                ):
-        super().__init__(
-            * args, input_format = input_format, output_format = output_format, ** kwargs
-        )
-    

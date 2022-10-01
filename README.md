@@ -1,29 +1,49 @@
 # :yum: Natural Language Processing (NLP) & Natural Language Understanding (NLU)
 
-**Important note** : this github is currently a simple copy of the original Master thesis' repository from @Ananas120 ([link](https://github.com/Ananas120/mag)). This repo currently only contains code for `Question Answering (Q&A)`. In the next update, it will be improved to be more general and contains more NLP tasks such as `Masked Language Modeling (MLM)`, `Next Word Prediction (NWP)`, etc. 
+This github is an extension of the [@Ananas120 Master thesis' repository](https://github.com/Ananas120/mag), extending [my base project](https://github.com/yui-mhcp/base_dl_project) to Q&A. I have generalized and cleaned up his code to allow general NLP tasks (and not only Q&A). Thanks to him for his contribution ! :smile:
 
 ## Project structure
 
 ```bash
-├── custom_architectures/   : custom architectures
-│   ├── transformers_arch/  : specific blocks for Transformers (BERT / BART / GPT-2 / ...)
-├── custom_layers/          : custom layers
-├── custom_train_objects/   : custom objects for training
-├── datasets/               : utilities for dataset loading / processing
-├── hparams/                : utility class to define modulable hyper-parameters
-├── loggers/                : some logging utilities
-├── models/                 : main `BaseModel` subclasses directory
-│   ├── interfaces/         : directory for `BaseModel` class and useful interfaces\*
-│   ├── qa/                 : directory for `Q&A` classes
-├── pretrained_models/      : saving directory for pretrained models
-├── unitest/                : custom unitest framework to test models' consistency
-└── utils/                  : utilities for data processing
-
+├── custom_architectures
+├── custom_layers
+├── custom_train_objects
+│   ├── losses
+│   │   └── qa_retriever_loss.py    : special loss for AnswerRetriever model
+│   ├── metrics
+│   │   ├── f1.py           : F1 implementation as a `tf.keras.metrics.Metric` class
+│   │   └── top_k_f1.py     : extension to support Beam-Search output
+├── datasets
+├── hparams
+├── loggers
+├── models
+│   ├── nlu             : general NLU classes
+│   │   ├── base_nlu_generator.py   : extension of `BaseNLUModel` for text-generative models
+│   │   ├── base_nlu_model.py       : general interface defining data loading for text-based models
+│   │   └── nlu_utils.py            : utilities for the NLU models
+│   ├── qa              : directory for Q&A based models
+│   │   ├── answer_generator.py     : model that generates an answer
+│   │   ├── answer_retriever.py     : model that retrieves the answer within the context
+│   │   ├── mag.py                  : extension of `AnswerGenerator` to support MAG-style
+│   │   ├── question_generator.py   : model that generates a question based on an answer
+│   │   └── web_utils.py            : utilities to search on the web and parse results (for Q&A inputs)
+├── pretrained_models
+├── unitest
+├── utils
+├── CITATIONS.thesis.bib    : citations for the master thesis
+├── Dockerfile-maggie       : runs the maggie bot in a Docker container
+├── Makefile                : defines commands to run / stop maggie
+├── docker-compose-maggie.yml   : runs maggie in docker-compose
+├── example_answer_generator.ipynb
+├── example_mag.ipynb
+├── experiments.py          : abstract file defining functions to run multiple experiments
+├── experiments_mag.py      : defines the functions to run MAG experiments
+├── maggie.py               : the code for the MAGgie bot
+├── main.py                 : main file to run build / train / test / predict command-line
+└── question_answering.ipynb
 ```
 
-See [my data_processing repository](https://github.com/yui-mhcp/data_processing) for more information on the `utils` module and `data processing` features, as well as `loggers` and `unitest`.
-
-See [my base project](https://github.com/yui-mhcp/base_dl_project) for more information on the `BaseModel` class, supported datasets, project extension, ...
+Check [the main project](https://github.com/yui-mhcp/base_dl_project) for more information about the unextended modules / structure / main classes. 
 
 
 ## Available features
@@ -32,30 +52,26 @@ See [my base project](https://github.com/yui-mhcp/base_dl_project) for more info
 
 | Feature   | Fuction / class   | Description |
 | :-------- | :---------------- | :---------- |
-| Text-To-Speech    | `tts`             | perform TTS on text you want with the model you want  |
-| stream            | `tts_stream`      | perform TTS on text you enter |
-| TTS logger        | `loggers.TTSLogger`   | converts `logging` logs to voice and play it |
+| Q&A       | `answer_from_web` | Performs question-answering based on top-k most relevant web pages |
 
-You can check the `text_to_speech` notebook for a concrete demonstration
+You can check the `question_answering` notebook for a concrete demonstration
 
 ## Available models
 
 ### Model architectures
 
-Available architectures : 
-- `Synthesizer` :
-    - [Tacotron2](https://arxiv.org/abs/1712.05884) with extensions for multi-speaker (by ID or `SV2TTS`)
-    - [SV2TTS](https://papers.nips.cc/paper/2018/file/6832a7b24bc06775d02b7406880b93fc-Paper.pdf) extension of the Tacotron2 architecture for multi-speaker based on speaker's embeddings\*
-- `Vocoder` :
-    - [Waveglow](https://arxiv.org/abs/1811.00002)
+Available architectures :
+- [BERT](http://arxiv.org/abs/1810.04805)
+- [BART](https://aclanthology.org/2020.acl-main.703)
+- [GPT-2](https://d4mucfpksywv.cloudfront.net/better-language-models/language-models.pdf)
+- `MAG`     : a general wrapper for text-based Transformers. 
 
-\* The speaker's embeddings are created with the Siamese Networks approach, which differs from the original paper. Check the [Siamese Networks](https://github.com/yui-mhcp/siamese_networks) project for more information on this architecture.
 
 ### Model weights
 
-| Task      | Language  | Name      | Class         | Dataset   | Trainer   | Weights   |
-| :-------: | :-------: | :-------: | :-----------: | :-------: | :-------: | :-------: |
-| /         | /         | /         | /             | /         | /         | /         |
+| Task      | Name      | Lang  | Class | Dataset   | Trainer   | Weights   |
+| :-------: | :-------: | :---: | :---: | :-------: | :-------: | :-------: |
+| Q&A       | maggie    | en    | MAG   | `NQ`, `CoQA`, `NewsQA`| [Ananas120](https://github.com/Ananas120) | [Google Drive](https://drive.google.com/file/d/1koG-UMMz8557zjkifTCpQMBgWVCqr1XS/view?usp=sharing)  |
 
 Weights will be added in the next update
 
@@ -66,13 +82,14 @@ Models must be unzipped in the `pretrained_models/` directory !
 1. Clone this repository : `git clone https://github.com/yui-mhcp/nlp.git`
 2. Go to the root of this repository : `cd nlp`
 3. Install requirements : `pip install -r requirements.txt`
-4. Open `text_to_speech` notebook and follow the instruction !
+4. Open `question_answering` notebook and follow the instruction !
 
 ## TO-DO list :
 
 - [x] Make the TO-DO list
-- [ ] Clean-up the code
-- [ ] Comment the code
+- [x] Clean-up the code
+- [x] Comment the code
+- [x] Create general NLU classes
 - [ ] Extend for general NLU tasks (and not only Q&A)
     - [ ] Add Masked Language Modeling (MLM) support
     - [ ] Add Next Word Prediction (NWP) support
@@ -88,6 +105,12 @@ Models must be unzipped in the `pretrained_models/` directory !
 For this reason, it is possible that this repo will be duplicated into a `nul/` repository and this one will integrate `nlu` as well as existing [TTS](https://github.com/yui-mhcp/text_to_speech) and [STT](https://github.com/yui-mhcp/speech_to_text) repositories. 
 
 Furthermore, the term *understanding* is an exageration as models do not really *understands* the language / the concepts behind words but mimic what they have learned to do / what contains their training database. 
+
+## Pipeline-based prediction
+
+The `BaseNLUModel` (and its subclasses) model supports the pipeline-based prediction, meaning that all the tasks you see in the below graph are multi-threaded. Check the [data_processing project](https://github.com/yui-mhcp/data_processing) for a better understanding of the `producer-consumer` framework. 
+
+![NLP pipelinepipeline](nlp_pipeline.jpg)
 
 ## Contacts and licence
 
@@ -120,6 +143,6 @@ Thanks to @Ananas120 for his contribution and sharing his code !
 
 ## Notes and references
 
-All the citations for the master thesis are available in the [CITATIONS](CITATIONS.thesis.bib) file with links for papers. 
+All the citations for the master thesis are available in the [CITATIONS](CITATIONS.thesis.bib) file with links for papers. They can be good papers to start NLP and discovers the Transformers-based models which are omnipresent nowadays in NLP /  NLU !
 
 The thesis report is not published by the university yet. 

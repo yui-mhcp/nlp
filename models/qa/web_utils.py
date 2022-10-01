@@ -1,4 +1,4 @@
-# Copyright (C) 2022 Quentin Langlois & yui-mhcp project's author. All rights reserved.
+# Copyright (C) 2022 Quentin L. & yui-mhcp project's author. All rights reserved.
 # Licenced under the Affero GPL v3 Licence (the "Licence").
 # you may not use this file except in compliance with the License.
 # See the "LICENCE" file at the root of the directory for the licence information.
@@ -17,6 +17,8 @@ import async_timeout
 
 from utils.text import _wiki_cleaner
 
+logger = logging.getLogger(__name__)
+
 _default_parser_config  = {
     'tags_to_keep'  : ['p'],
     'skip_header'   : True,
@@ -31,6 +33,22 @@ DEFAULT_TIMEOUT = 10
 
 _ddg_api_url    = 'http://api.duckduckgo.com/'
 _bing_api_url   = 'http://www.bing.com/search'
+
+def _search_wrapper(fn):
+    def wrapper(query, * args, site = None, n = 10, ** kwargs):
+        if site: query = '{} site:{}'.format(query)
+        
+        urls = []
+        for url in fn(query, * args, ** kwargs):
+            urls.append(url)
+            if len(urls) >= n: break
+        return urls
+    
+    wrapper_fn = wrapper
+    wrapper_fn.__doc__  = fn.__doc__
+    wrapper_fn.__name__ = fn.__name__
+    
+    return wrapper_fn
 
 def prepare_web_data(question,
                      url     = None,
@@ -53,7 +71,7 @@ def prepare_web_data(question,
         url, engine = result['urls'], result['engine']
     if not isinstance(url, (list, tuple)): url = [url]
     
-    logging.debug('URL\'s : {}'.format(url))
+    logger.debug('URL\'s : {}'.format(url))
     
     kept_urls   = []
     parsed      = []
@@ -63,24 +81,24 @@ def prepare_web_data(question,
         try:
             res = requests.get(url_i, timeout = timeout)
             if res.status_code != 200 or 'html' not in res.headers.get('Content-Type', ''):
-                logging.dev('Skip url (content type = {}, status = {})'.format(
+                logger.dev('Skip url (content type = {}, status = {})'.format(
                     res.headers.get('Content-Type', ''), res.status_code
                 ))
                 continue
             
             page = parse_html(res.text, ** parser_config)
             if len(page) <= min_page_length:
-                logging.dev('Page {} is too short ({})'.format(url_i, len(page)))
+                logger.dev('Page {} is too short ({})'.format(url_i, len(page)))
                 continue
             
             kept_urls.append(url_i)
             parsed.extend(page)
         except Exception as e:
-            logging.error('Error when getting url {} : {}'.format(url_i, e))
+            logger.error('Error when getting url {} : {}'.format(url_i, e))
     
     if len(parsed) == 0: parsed = [{'title' : '', 'text' : '<no result>'}]
     
-    logging.dev('Kept url(s) : {}'.format(kept_urls))
+    logger.dev('Kept url(s) : {}'.format(kept_urls))
     
     data = {
         'question'      : question,
@@ -92,8 +110,26 @@ def prepare_web_data(question,
     }
     return data
 
-def search_on_web(query, * args, engine = None, test_all_engines = True,
-                  timeout = DEFAULT_TIMEOUT, ** kwargs):
+def search_on_web(query,
+                  * args,
+                  engine    = None,
+                  timeout   = DEFAULT_TIMEOUT,
+                  test_all_engines  = True,
+                  ** kwargs
+                 ):
+    """
+        Searches `query` with (possibly) multiple search engine API and returns results
+        
+        Arguments :
+            - query : the search query
+            - engine    : the search engine's name to use
+            - timeout   : the API request timeout
+            - test_all_engines  : whether to test other engines if the given onee fails
+            - args / kwargs : forwarded to the search function, you can check common kwargs with `help(_search_wrapper)` which wraps all search functions to preprocess the query and filters the results
+        Returns : a dict {engine : engine_name, urls : list_of_urls}
+            - engine_name   : the engine that returned the urls
+            - list_of_urls  : urls returned by the search engine's API
+    """
     global _default_engine
     
     if engine is None: engine = _default_engine
@@ -103,51 +139,41 @@ def search_on_web(query, * args, engine = None, test_all_engines = True,
             tuple(_search_engines.keys()), engine
         ))
     
-    if test_all_engines:
-        engines  = [engine] + [e for e in _search_engines.keys() if e != engine]
-    else:
-        engines = [engine]
+    other_engines = [] if not test_all_engines else [e for e in _search_engines if e != engine]
+    engines = [engine] + other_engines
+
     for engine_i in engines:
         try:
-            logging.info('Try query {} on engine {}...'.format(query, engine_i))
+            logger.info('Try query {} on engine {}...'.format(query, engine_i))
             try:
                 with async_timeout.timeout(timeout):
                     urls    = _search_engines[engine_i](query, * args, ** kwargs)
             except RuntimeError as e:
-                logging.warning('Cannot use timeout here : {} !'.format(e))
+                logger.warning('Cannot use async_timeout here : {} !'.format(e))
                 urls    = _search_engines[engine_i](query, * args, ** kwargs)
+            
             if len(urls) == 0:
-                logging.warning('No result with engine {} for query {}, trying another search engine !'.format(engine_i, query))
+                logger.warning('No result with engine {} for query {}, trying another search engine !'.format(engine_i, query))
                 continue
             
-            result = {'engine' : engine_i, 'urls' : urls}
-            
             if _default_engine is None: _default_engine = engine_i
-            
-            return result
+
+            return {'engine' : engine_i, 'urls' : urls}
         except Exception as e:
-            print(type(e))
-            logging.error('Error with engine {} : {}, trying next engine'.format(engine_i, str(e)))
-            #if _default_engine == engine: _default_engine = None
+            logger.error('Error with engine {} : {}, trying next engine'.format(engine_i, str(e)))
     
+    logger.warning('No engine succeed !')
     return {'engine' : None, 'urls' : []}
 
-def search_on_google(query, n = 10, site = None, ** kwargs):
+@_search_wrapper
+def _search_on_google(query, ** kwargs):
     """ Return a list of url's for a given query """
     import googlesearch as google
     
-    if site is not None: query = '{} site:{}'.format(query, site)
-    
-    results = []
-    for res in google.search(query, safe = 'on', ** kwargs):
-        results.append(res)
-        if len(results) == n: break
-    
-    return results
+    return google.search(query, safe = 'on', ** kwargs)
 
-def search_on_ddg(query, n = 10, site = None, ** kwargs):
-    if site is not None: query = '{} site:{}'.format(query, site)
-
+@_search_wrapper
+def _search_on_ddg(query, ** kwargs):
     params = {
         'q'     : query,
         'o'     : 'json',
@@ -162,27 +188,23 @@ def search_on_ddg(query, n = 10, site = None, ** kwargs):
     if len(res.content) == 0 or not res.json()['AbstractURL']: return []
     return res.json()['AbstractURL']
 
-def search_on_bing(query, n = 10, site = None, ** kwargs):
+@_search_wrapper
+def _search_on_bing(query, user_agent = None, ** kwargs):
     from bs4 import BeautifulSoup
     
-    if site is not None: query = query + ' site:' + site
     params = {
         'q'     : '+'.join(query.split())
     }
     encoded = '&'.join(['{}={}'.format(k, v) for k, v in params.items()])
     url = '{}?{}'.format(_bing_api_url, encoded)
-    res = BeautifulSoup(requests.get(url, headers = {'User-Agent' : 'mag'}).text)
+    res = BeautifulSoup(requests.get(url, headers = {'User-Agent' : user_agent}).text)
 
-    raw_results = res.find_all('li', attrs= {'class' : 'b_algo'})
-    links = []
-    for raw in raw_results:
+    for raw in res.find_all('li', attrs = {'class' : 'b_algo'}):
         link = raw.find('a').get('href')
-        if link: links.append(link)
-        
-    return links[:n]
+        if link: yield link
 
 _search_engines = {
-    'google'    : search_on_google,
-    'bing'      : search_on_bing,
-    'ddg'       : search_on_ddg
+    'google'    : _search_on_google,
+    'bing'      : _search_on_bing,
+    'ddg'       : _search_on_ddg
 }
