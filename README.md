@@ -48,7 +48,7 @@ Check [the main project](https://github.com/yui-mhcp/base_dl_project) for more i
 
 ## Available features
 
-- **Text-To-Speech** (module `models.tts`) :
+- **Question Answering** (module `models.qa`) :
 
 | Feature   | Fuction / class   | Description |
 | :-------- | :---------------- | :---------- |
