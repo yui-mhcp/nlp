@@ -428,6 +428,10 @@ class BaseModel(metaclass = ModelInstances):
         var = []
         for _, model in self.models.items():
             var += model.trainable_variables
+        
+        for _, loss in self.losses.items():
+            if isinstance(loss, tf.keras.losses.Loss) and hasattr(loss, 'trainable_variables'):
+                var += loss.trainable_variables
         return var
     
     @property
@@ -574,12 +578,12 @@ class BaseModel(metaclass = ModelInstances):
         if met_name is None:
             if model_name is not None:
                 met_name = self.__models[model_name].get('metrics_name', None)
-            elif len(self.losses) == 1:
-                met_name = list(self.losses.keys())[0]
+            elif len(self.metrics) == 1:
+                met_name = self.metrics[0]
         
         if isinstance(met_name, list):
-            return [self.__metrics[m] for m in met_name]
-        return self.__metrics[met_name] if met_name is not None else None
+            return [self.__metrics[m] if isinstance(m, str) else m for m in met_name]
+        return self.__metrics[met_name] if isinstance(met_name, str) else met_name
     
     def get_compiled_metrics(self, new_metrics = None, add_loss = True):
         metrics = get_metrics(
@@ -684,7 +688,7 @@ class BaseModel(metaclass = ModelInstances):
     def count_params(self):
         return sum([model.count_params() for name, model in self.models.items()])
     
-    def compile(self, model_name = None, **kwargs):
+    def compile(self, model_name = None, ** kwargs):
         """
             compile sub model(s) with given loss, optimizer, metrics and their respective configuration 
             See `compile_model` for accepted kwargs names
@@ -865,6 +869,8 @@ class BaseModel(metaclass = ModelInstances):
         valid_config.setdefault('cache', False)
         
         test_kwargs = kwargs.copy()
+        if isinstance(test_batch_size, float):
+            test_batch_size = int(valid_config['batch_size'] * test_batch_size)
         test_kwargs.update({
             'batch_size' : test_batch_size, 'train_batch_size' : None, 'valid_batch_size' : None,
             'cache' : False, 'is_validation' : True
@@ -889,11 +895,11 @@ class BaseModel(metaclass = ModelInstances):
             train_dataset, _ = train_test_split(
                 dataset, train_size = train_size,
                 random_state = random_state, shuffle = pre_shuffle
-            ) if train_size is not None else dataset, None
+            ) if (train_size) and (not hasattr(dataset, '__len__') or train_size < len(dataset)) else dataset, None
             valid_dataset, _ = train_test_split(
                 validation_data, train_size = train_size,
                 random_state = random_state, shuffle = pre_shuffle
-            ) if valid_size is not None else validation_data, None
+            ) if (valid_size) and (not hasattr(validation_data, '__len__') or valid_size < len(validation_data)) else validation_data, None
         
         if test_size > 0:
             test_dataset    = prepare_dataset(valid_dataset,  ** test_config)

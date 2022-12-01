@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir --upgrade -r requirements.txt
 
 RUN apt install -y graphviz
 
-COPY . .
+COPY .. .
 
 ARG USER_ID
 ARG USER_NAME

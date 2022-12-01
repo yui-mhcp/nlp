@@ -459,16 +459,20 @@ class BaseNLUModel(BaseTextModel):
     def filter_input(self, inputs):
         """ Check `is_valid_tokens` for information """
         valid = True
+
         if self.input_format is not None:
             valid = is_valid_tokens(inputs[0], max_length = self.max_input_length)
         if valid and self.input_multi_format is not None:
-            valid = is_valid_tokens(
-                inputs[-2], max_length = self.max_multi_input_length if not self.split_multi_input else self.max_sentence_length
-            )
-            if valid and self.split_multi_input and self.max_split_sentences > 0:
-                valid = tf.shape(inputs[-2])[0] <= self.max_split_sentences
+            max_multi_length = -1
+            if self.split_multi_input: max_multi_length = self.max_sentence_length
+            elif self.max_multi_input_length is not None: max_multi_length = self.max_multi_input_length
+            else: max_multi_length = self.max_input_length
+            valid = is_valid_tokens(inputs[-2], max_length = max_multi_length)
             
-            if valid and self.use_multi_input:
+            if valid and self.split_multi_input and self.max_split_sentences > 0:
+                valid = valid and tf.shape(inputs[-2])[0] <= self.max_split_sentences
+            
+            if len(tf.shape(inputs[-1])) > 0:
                 if self.max_input_texts > 0:
                     valid = valid and tf.shape(inputs[-1])[0] <= self.max_input_texts * (
                         1 if not self.split_multi_input else max(self.max_split_sentences, 1)
@@ -947,6 +951,8 @@ class BaseNLUModel(BaseTextModel):
     def predict(self, data, ** kwargs):
         """ Performs the inference pipeline on `data` """
         if not isinstance(data, (list, pd.DataFrame)): data = [data]
+        pred_hparams   = self.training_hparams.extract(kwargs, pop = True)
+        self.init_train_config(** pred_hparams)
         
         pipeline = self.get_pipeline(** kwargs)
         

@@ -1,12 +1,12 @@
 services:
-    maggie:
-        image: maggie:latest
-        command: sh -c "python3 maggie.py"
+    main:
+        image: main:latest
         build:
             context: .
-            dockerfile: Dockerfile-maggie
+            dockerfile: Dockerfile-jupyter
         volumes:
-            - .:/app
+            - /storage:/storage
+            - ..:/app
         deploy:
             resources:
                 reservations:

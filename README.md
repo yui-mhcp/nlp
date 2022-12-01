@@ -90,12 +90,13 @@ Models must be unzipped in the `pretrained_models/` directory !
 - [x] Clean-up the code
 - [x] Comment the code
 - [x] Create general NLU classes
+- [x] Allow to modify the default configuration in `predict` method (experimental)
 - [ ] Extend for general NLU tasks (and not only Q&A)
     - [ ] Add Masked Language Modeling (MLM) support
     - [ ] Add Next Word Prediction (NWP) support
     - [ ] Add Neural Machine Translation (NMT) support
     - [ ] Add text classification tasks (such as intent / emotion / topic classification)
-- [ ] Add pretrained models (for Q&A in English) (Ananas120's master thesis models)
+- [x] Add pretrained models (for Q&A in English) (Ananas120's master thesis models)
 - [ ] Add new languages support
 - [ ] Add document parsing to perform Q&A on document (in progress)
 

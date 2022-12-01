@@ -18,16 +18,18 @@ import pandas as pd
 import tensorflow as tf
 
 from tqdm import tqdm
+from multiprocessing import cpu_count
 
-from utils.file_utils import load_data, dump_pickle
-from utils.sequence_utils import pad_batch
+from utils.file_utils import load_data, dump_data
 from utils.pandas_utils import filter_df, aggregate_df
-from utils.thread_utils import ThreadedQueue
+from utils.sequence_utils import pad_batch
 
 logger = logging.getLogger(__name__)
 
-_allowed_embeddings_ext = ('.csv', '.npy', '.pkl')
+_allowed_embeddings_ext = ('.csv', '.npy', '.pkl', '.pdpkl')
+_default_embedding_ext  = '.pdpkl'
 _embedding_filename = 'embeddings_{}'
+
 _accepted_modes     = ('random', 'mean', 'average', 'avg', 'int', 'callable')
 
 def get_embedding_file_ext(filename):
@@ -40,8 +42,8 @@ def embeddings_to_np(embeddings, col = 'embedding'):
     """ Return a numpy matrix of embeddings from a dataframe column """
     # if it is a string representation of a numpy matrix
     if isinstance(embeddings, str):
-        # if it is a 2D-matrix
         if embeddings.startswith('['):
+            # if it is a 2D-matrix
             if embeddings.startswith('[['):
                 logger.debug(embeddings[1 : -1].split(']')[0][1:])
                 return np.array([
@@ -49,10 +51,9 @@ def embeddings_to_np(embeddings, col = 'embedding'):
                 ])
             # if it is a 1D-vector
             return np.fromstring(embeddings[1:-1], dtype = float, sep = '\t').astype(np.float32)
-        else:
-            if not os.path.isfile(embeddings):
-                raise ValueError("You must provide an existing embedding file (got {})".format(embeddings))
-            return embeddings_to_np(load_embeddings(embeddings))
+        elif not os.path.isfile(embeddings):
+            raise ValueError("You must provide an existing embedding file (got {})".format(embeddings))
+        return embeddings_to_np(load_embeddings(embeddings))
     elif isinstance(embeddings, np.ndarray): return embeddings
     elif isinstance(embeddings, tf.Tensor): return embeddings.numpy()
     elif isinstance(embeddings, pd.DataFrame):
@@ -62,115 +63,123 @@ def embeddings_to_np(embeddings, col = 'embedding'):
     else:
         raise ValueError("Invalid type of embeddings : {}\n{}".format(type(embeddings), embeddings))
 
-def embed_dataset(directory, dataset, embed_fn, embedding_dim, rate,
-                  overwrite = False, embedding_name = _embedding_filename, 
-                  max_audios = 10000, save_every = 25000, audio_kwargs = {},
-                  verbose = True, tqdm = tqdm, ** kwargs):
-    """
-        Create embedding of all speakers in dataset and save results as csv files
-        Arguments : 
-            - directory : directory to save resulting csv files
-            - dataset   : the pd.DataFrame dataset to embed
-            - embed_fn  : embedding function, should accept a list of audios and return their embeddings
-            - embedding_dim : dimension of the resulting embedding (use to create sub-directory for results)
-            - rate      : rate of the audio needed by 'embed_fn'
-            
-            - max_audios    : number of audios to load in cache for 1 speaker
-            - save_every    : number of audios to embed before saving (to avoid to restart all processing if error occurs)
-            - verbose   : verbosity
-            - tqdm      : progress_bar
-            - embedding_name   : name of the embeddings csv file (1 embedding per utterance)
-            - kwargs    : kwargs passed to 'embed_fn'
-        
-        Return : embeddings
-            embeddings : pd.DataFrame([{'filename' :, 'embedding' :, 'id' :}, ...])
-            
-        
-        Notes : files are saved in directory <directory>/embeddings_<embedding_dim>/
-    """
-    from utils.audio.audio_io import load_audio
-
-    def embed_batch(batch):
-        pool = ThreadedQueue(load_audio, keep_result = True)
-        pool.start()
-        
-        if isinstance(batch, pd.DataFrame): batch = batch.to_dict('records')
-        for a in batch: pool.append(data = a, rate = rate, ** audio_kwargs)
-        
-        loaded_audios = pool.wait_result()
-        
-        if verbose: kwargs['tqdm'] = tqdm
-        embedded_audios = embed_fn(loaded_audios, ** kwargs)
-        if isinstance(embedded_audios, tf.Tensor): embedded_audios = embedded_audios.numpy()
-        
-        return embedded_audios
+def aggregate_embeddings(dataset, column = 'id', aggregation_name = 'speaker_embedding', mode = 0):
+    if aggregation_name in dataset.columns:
+        dataset.pop(aggregation_name)
     
-    directory       = os.path.join(directory, 'embeddings')
-    embeddings_file = os.path.join(directory, embedding_name.format(embedding_dim))
-    
-    os.makedirs(directory, exist_ok = True)
-    embeddings = pd.DataFrame([], columns = ['filename', 'embedding', 'id'])
-    if os.path.exists(embeddings_file) and not overwrite:
-        embeddings = load_embedding(embeddings_file, with_speaker_embedding = False)
-        
-    processed = dataset['filename'].isin(embeddings['filename'])
-    to_process = dataset[~processed].to_dict('records')
-    
-    if len(to_process) == 0:
-        logger.info("Dataset already processed !")
-        return embeddings
-        
-    logger.info("Processing dataset...\n  {} utterances already processed\n  {} utterances to process".format(len(dataset) - len(to_process), len(to_process)))
-    
-    n = len(embeddings)
-    nb_batch = len(to_process) // max_audios + 1
-    for i in range(nb_batch):
-        logger.info("Batch {} / {}".format(i+1, nb_batch))
-        start_idx = i * max_audios
-        batch = to_process[start_idx : start_idx + max_audios]
-        if len(batch) == 0: continue
-
-        embedded = embed_batch(batch)
-        
-        embedded = [
-            {'filename' : infos['filename'], 'embedding' : e, 'id' : infos['id']} 
-            for infos, e in zip(batch, embedded)
-        ]
-        embedded = pd.DataFrame(embedded)
-        
-        embeddings = embeddings.append(embedded)
-        
-        if len(embeddings) - n >= save_every:
-            n = len(embeddings)
-            logger.info("Saving at utterance {}".format(len(embeddings)))
-            save_embeddings(embeddings_file, embeddings)
-    
-    if n < len(embeddings):
-        save_embeddings(embeddings_file, embeddings)
-    
-    return embeddings
-
-def add_speaker_embedding(dataset, column = 'id', mode = 0):    
-    if 'speaker_embedding' in dataset:
-        dataset.pop('speaker_embedding')
     if column not in dataset.columns:
         dataset[column] = 'id'
     if column != 'id':
         for idx, row in dataset.iterrows():
-            if column not in row or row[column] == np.nan:
+            if column not in row or row[column] is np.nan:
                 dataset.at[idx, column] = row['id']
     
+    kw = {aggregation_name : mode}
     return aggregate_df(
-        dataset, column, 'embedding', merge = True, speaker_embedding = mode
+        dataset, column, 'embedding', merge = True, ** kw
     )
 
-def save_embeddings(directory, embeddings, embedding_name = _embedding_filename):
-    """
-        Save embedding to the given path
+def embed_dataset(directory,
+                  dataset,
+                  embed_fn,
+                  batch_size    = 1,
+                  
+                  load_fn   = None,
+                  cache_size    = 10000,
+                  max_workers   = cpu_count(),
+                  
+                  save_every    = 10000,
+                  overwrite     = False,
+                  embedding_name    = _embedding_filename,
+                  
+                  tqdm = tqdm,
+                  verbose   = True,
+                  
+                  ** kwargs
+                 ):
+    if load_fn is None: cache_size = batch_size
+    else:
+        from utils.thread_utils import Consumer
         
-        /:\ WARNING /!\ for N-D embeddings you ** must ** use a `.pkl` or `.npy` but not a `.csv` otherwise it will be some errors when loading it
+        cache_size      = max(cache_size, batch_size)
+        load_consumer   = Consumer(load_fn, max_workers = max_workers, keep_result = False)
+        load_consumer.start()
+    
+    round_tqdm  = tqdm if load_fn is None else lambda x: x
+    if load_fn is None: tqdm = None
+    
+    embeddings = None
+    if not overwrite:
+        embeddings = load_embedding(
+            directory = directory, embedding_name = embedding_name, aggregate_on = None, ** kwargs
+        )
+    
+    processed, to_process = [], dataset
+    if embeddings is not None:
+        processed   = dataset['filename'].isin(embeddings['filename'])
+        to_process  = dataset[~processed]
+
+    if len(to_process) == 0:
+        logger.info("Dataset already processed !")
+        return embeddings
+    
+    to_process = to_process.to_dict('records')
+
+    logger.info("Processing dataset...\n  {} utterances already processed\n  {} utterances to process".format(len(dataset) - len(to_process), len(to_process)))
+
+    n, n_round = 0 if embeddings is None else len(embeddings), len(to_process) // cache_size + 1
+    for i in round_tqdm(range(n_round)):
+        if load_fn is not None: logger.info("Round {} / {}".format(i + 1, n_round))
+        
+        batch = to_process[i * cache_size : (i + 1) * cache_size]
+        if len(batch) == 0: continue
+        
+        if load_fn is not None:
+            batch = load_consumer.extend_and_wait(batch, tqdm = tqdm, stop = False, ** kwargs)
+
+        embedded = embed_fn(batch, batch_size = batch_size, tqdm = tqdm, ** kwargs)
+        if hasattr(embedded, 'numpy'): embedded = embedded.numpy()
+        
+        embedded = pd.DataFrame([
+            {'filename' : infos['filename'], 'id' : infos['id'], 'embedding' : emb} 
+            for infos, emb in zip(to_process[i * cache_size : (i + 1) * cache_size], embedded)
+        ])
+        embeddings = pd.concat([embeddings, embedded], ignore_index = True) if embeddings is not None else embedded
+        
+        if len(embeddings) - n >= save_every:
+            n = len(embeddings)
+            if load_fn is not None: logger.info("Saving at utterance {}".format(len(embeddings)))
+            save_embeddings(
+                directory, embeddings, embedding_name, remove_file_prefix = True
+            )
+    
+    if n < len(embeddings):
+        save_embeddings(
+            directory, embeddings, embedding_name, remove_file_prefix = True
+        )
+    
+    return embeddings
+
+def save_embeddings(directory,
+                    embeddings,
+                    embedding_name  = _embedding_filename,
+                    remove_file_prefix  = True
+                   ):
     """
-    if directory[-4 :] in _allowed_embeddings_ext:
+        Save `embeddings` to the given path
+        
+        Arguments :
+            - directory : the embeddings' filename (if ending with a valid extension) or the directory
+            - embeddings    : the embeddings to save
+            embedding_name  : the filename basename
+                If no extension, set to `_default_embedding_ext`
+                If contains {}, formatted with the embedding dimension (`embeddings.shape[-1]`)
+            - remove_file_prefix    : if a `filename` column is there, remove the `remove_file_prefix` from the start of filenames (only working when embeddings is a `pd.DataFrame`)
+                If `True`, removes the `get_dataset_dir` prefix
+                It is useful when saving datasets as the dataset directory can differ between machines, meaning that filenames also differ.
+                Note that it is removed only at the start of filenames such that if your filename is not in the dataset directory, it will have no effect ;)
+    """
+    if os.path.splitext(directory)[1] in _allowed_embeddings_ext:
         embedding_file = directory
     else:
         if not directory.endswith('embeddings'):
@@ -182,82 +191,122 @@ def save_embeddings(directory, embeddings, embedding_name = _embedding_filename)
         embedding_dim   = embeddings_to_np(embeddings).shape[-1]
         embedding_file  = embedding_file.format(embedding_dim)
     
-    if embedding_file.endswith('.pkl'):
-        dump_pickle(embedding_file, embeddings)
-    elif embedding_file.endswith('.npy') or isinstance(embeddings, (np.ndarray, tf.Tensor)):
-        if not embedding_file.endswith('.npy'): embedding_file += '.npy'
-        embeddings = embeddings_to_np(embeddings)
-        np.save(embedding_file, embeddings)
+    ext = os.path.splitext(embedding_file)[1]
+    if not ext: embedding_file += _default_embedding_ext
+    elif ext not in _allowed_embeddings_ext:
+        raise ValueError('Unknown embedding extension !\n  Accepted : {}\n  Got : {}'.format(
+            _allowed_embeddings_ext, embedding_file
+        ))
+    
+    if embedding_file.endswith('npy'): embeddings = embeddings_to_np(embeddings)
+    elif remove_file_prefix is not None and isinstance(embeddings, pd.DataFrame) and 'filename' in embeddings.columns:
+        if remove_file_prefix is True:
+            try:
+                from datasets.custom_datasets import get_dataset_dir
+                remove_file_prefix = get_dataset_dir()
+            except (ImportError, ModuleNotFoundError):
+                pass
         
-    elif isinstance(embeddings, pd.DataFrame):
-        if not embedding_file.endswith('.csv'): embedding_file += '.csv'
-        embeddings.to_csv(embedding_file, index = False)
-    else:
-        raise ValueError('Embeddings\' type ({}) and filename ({}) are not compatible !'.format(type(embeddings), embedding_file))
+        if isinstance(remove_file_prefix, str):
+            embeddings['filename'] = embeddings['filename'].apply(
+                lambda f: f.lstrip(remove_file_prefix)
+            )
+    
+    dump_data(embedding_file, embeddings)
     
     return embedding_file
     
 
 def load_embedding(directory,
+                   embedding_name   = _embedding_filename,
                    embedding_dim    = None,
                    dataset          = None,
-                   embedding_col    = 'id',
-                   embedding_mode   = 0, 
-                   embedding_name   = _embedding_filename,
-                   with_speaker_embedding   = True, 
+                   filename_prefix  = True,
+                   
+                   aggregate_on     = 'id',
+                   aggregate_mode   = 0,
+                   aggregate_name   = 'speaker_embedding',
                    ** kwargs
                   ):
     """
         Load embeddings from file (csv / npy / pkl) and create an aggregation version
         
         Arguments : 
-            - directory     : directory on which embeddings are stored (must be 'embeddings' or have a sub-directory named 'embeddings')
-            - embedding_dim : dimension of the embedding (will format `embedding_name` with it)
+            - directory     : directory in which embeddings are stored (must be 'embeddings' or have a sub-directory named 'embeddings')
+                It can also be the embeddings' filename
+            - embedding_name    : the embeddings' filename (can contains '{}' which will be formatted by `embedding_dim`)
+            - embedding_dim : dimension of the embedding (will format `filename` if required)
+            
+            - filename_prefix   : a path to add at all filenames' start
+                if `True`, it adds the `get_dataset_dir` as prefix
+                Note that if the filename exists as is, it will have no effect
+            
             - dataset       : the dataset on which to merge embeddings
-            - embedding_name    : name for the filename
-            - embedding_col / embedding_mode    : args to compute the 'speaker_embedding' col which is an aggregated version of 'embedding'
+            
+            - aggregate_on  : the column to aggregate on
+            - aggregate_mode    : the mode for the aggregation
+            - aggregate_name    : the name for the aggregated embeddings' column (default to `speaker_embedding` for retro-compatibility)
         Return :
-            - embeddings or dataset merged with embeddings (merge is done on 'id' and 'filename')
+            - embeddings or dataset merged with embeddings (merge is done on columns that are both in `dataset` and `embeddings`)
     """
-    embedding_name = embedding_name.format(embedding_dim)
-    
     if os.path.isfile(directory):
         emb_file = directory
-    elif os.path.exists(embedding_name):
-        emb_file = embedding_name
     else:
-        if not directory.endswith('embeddings'):
-            directory = os.path.join(directory, 'embeddings')
-        emb_file = os.path.join(directory, embedding_name)
+        if '{}' in embedding_name:
+            assert embedding_dim is not None
+            embedding_name = embedding_name.format(embedding_dim)
+        
+        if os.path.exists(embedding_name):
+            emb_file = embedding_name
+        else:
+            if not directory.endswith('embeddings'):
+                directory = os.path.join(directory, 'embeddings')
+            emb_file = os.path.join(directory, embedding_name)
+    
+    if not os.path.splitext(emb_file)[1]:
+        ext = get_embedding_file_ext(emb_file)
+        if ext: emb_file += ext
     
     if not os.path.exists(emb_file):
-        ext = get_embedding_file_ext(emb_file)
-        
-        if ext is None:
-            raise ValueError("Embedding file {} does not exist !".format(emb_file))
-        
-        emb_file += ext
+        return None
     
     embeddings  = load_data(emb_file)
     if not isinstance(embeddings, pd.DataFrame): return embeddings
 
     for embedding_col_name in [col for col in embeddings.columns if col.endswith('embedding')]:
+        if isinstance(embeddings.loc[0, embedding_col_name], np.ndarray): continue
         embeddings[embedding_col_name] = embeddings[embedding_col_name].apply(
             lambda x: embeddings_to_np(x)
         )
     
-    
-    if with_speaker_embedding and embedding_col in embeddings.columns:
-        embeddings = add_speaker_embedding(
-            embeddings, embedding_col, mode = embedding_mode
+    if aggregate_on is not None and aggregate_on in embeddings.columns:
+        embeddings = aggregate_embeddings(
+            embeddings, aggregate_on, aggregation_name = aggregate_name, mode = aggregate_mode
         )
+    
+    if filename_prefix is not None and 'filename' in embeddings.columns:
+        if filename_prefix is True:
+            try:
+                from datasets.custom_datasets import get_dataset_dir
+                filename_prefix = get_dataset_dir()
+            except (ImportError, ModuleNotFoundError):
+                pass
+        
+        if isinstance(filename_prefix, str):
+            embeddings['filename'] = embeddings['filename'].apply(
+                lambda f: os.path.join(filename_prefix, f)
+            )
     
     if dataset is None: return embeddings
     
-    if embeddings['id'].dtype != dataset['id'].dtype:
-        embeddings['id'] = embeddings['id'].apply(lambda i: str(i))
+    intersect = list(set(embeddings.columns).intersection(set(dataset.columns)))
     
-    dataset = pd.merge(dataset, embeddings, on = ['id', 'filename'])
+    for col in intersect:
+        if embeddings[col].dtype != dataset[col].dtype:
+            embeddings[col] = embeddings[col].apply(lambda i: str(i))
+    
+    logger.debug('Merging embeddings with dataset on columns {}'.format(intersect))
+    dataset = pd.merge(dataset, embeddings, on = intersect)
 
     dataset = dataset.dropna(
         axis = 'index', subset = ['embedding', 'speaker_embedding']
@@ -308,7 +357,9 @@ def select_embedding(embeddings, mode = 'random', ** kwargs):
     elif callable(mode):
         return mode(np_embeddings)
     else:
-        raise ValueError("Mode to compute speaker embedding unknown\n  Get : {}\n  Accepted : {}".format(mode, _accepted_modes))
+        raise ValueError("Mode to select embedding unknown\n  Get : {}\n  Accepted : {}".format(
+            mode, _accepted_modes
+        ))
     
 def compute_mean_embeddings(embeddings, ids):
     """

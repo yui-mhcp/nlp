@@ -48,11 +48,27 @@ logger  = logging.getLogger(__name__)
 
 PRED_DIR    = os.path.join('__predictions')
 
-def simple_generator_config(model_name, bart_base = 'facebook/bart-large', ** kwargs):
+ALLOWED_DATASETS    = ('nq', 'squad', 'coqa', 'newsqa', 'french_squad', 'piaf', 'fquad')
+
+def _is_barthez(model_name):
+    return True if ('fmag' in model_name or 'fbart' in model_name) and '_big_' not in model_name else False
+
+def _is_french_model(model_name):
+    return True if 'fmag' in model_name or 'fbart' in model_name else False
+
+def simple_generator_config(model_name, bart_base = None, ** kwargs):
+    if bart_base is None:
+        if '_big_' in model_name:
+            bart_base = 'moussaKam/mbarthez'
+        elif _is_barthez(model_name):
+            bart_base = 'moussaKam/barthez'
+        else:
+            bart_base = 'facebook/bart-large'
+    
     return {
         'class'     : 'AnswerGenerator',
         'nom'       : model_name,
-        'lang'      : 'en',
+        'lang'      : 'en' if not _is_french_model(model_name) else 'fr',
         'pretrained'    : bart_base,
         'text_encoder'  : bart_base,
         
@@ -64,7 +80,7 @@ def simple_generator_config(model_name, bart_base = 'facebook/bart-large', ** kw
         ** kwargs
     }
 
-def config_from_name(model_name, bart_base = 'facebook/bart-large', ** kwargs):
+def config_from_name(model_name, bart_base = None, ** kwargs):
     config = simple_generator_config(model_name, bart_base, ** kwargs)
     if 'mag' not in model_name: return config
     
@@ -86,7 +102,7 @@ def config_from_name(model_name, bart_base = 'facebook/bart-large', ** kwargs):
         'subsample_input'   : True if 'splitq' in model_name else False,
         
         'split_key' : 'context',
-        'input_multi_format' : '{context}' if 'ct' not in model_name else '{title}{sep_token}{context}',
+        'input_multi_format' : '{context}' if 'ct' not in model_name else ['{title}', '{context}'],
         'multi_input_offset'    : offset,
         'split_multi_input' : True if '_split_' in model_name else False,
         
@@ -111,10 +127,13 @@ def config_from_name(model_name, bart_base = 'facebook/bart-large', ** kwargs):
 def simple_train_generator_config(model_name, retraining = False, lr = 1e-5, ** kwargs):
     use_doc = 'mag' in model_name and ('doc' in model_name or 'qangaroo' in model_name)
     
+    datasets    = [
+        ds_name for ds_name in ALLOWED_DATASETS if ds_name in model_name
+    ]
+    if 'french_squad' in datasets: datasets.remove('squad')
+    
     return {
-        'dataset'   : [
-            ds_name for ds_name in ['nq', 'coqa', 'newsqa', 'squad'] if ds_name in model_name
-        ],
+        'dataset'   : datasets,
         
         'compile_config'    : {
             'optimizer' : 'adam', 'optimizer_config' : {'lr' : lr}
@@ -131,11 +150,12 @@ def simple_train_generator_config(model_name, retraining = False, lr = 1e-5, ** 
         'is_rectangular'    : False if use_doc else True,
 
         'epochs'    : 1,
-        'batch_size'    : 6,
+        'batch_size'    : 6 if not _is_barthez(model_name) else 12,
         
         'shuffle_size'  : 6 * 32,
 
         'max_input_length'  : 512,
+        'max_multi_input_length'    : 512,
         'max_output_length' : 32 * 3,
         ** kwargs
     }
@@ -144,20 +164,24 @@ def training_config_from_name(model_name, retraining = False, ** kwargs):
     lr = 1e-5
     if 'dense' in model_name:
         lr = {'name' : 'DivideByStep', 'maxval' : 1e-5, 'minval' : 1e-6, 'factor' : 0.1}
-
+    elif _is_french_model(model_name):
+        lr = {'name' : 'DivideByStep', 'maxval' : 5e-5, 'minval' : 1e-5, 'factor' : 0.1}
+        
     config = simple_train_generator_config(model_name, retraining, lr = lr, ** kwargs)
     if 'mag' not in model_name: return config
     
     use_doc = config['dataset_config']['include_document']
-    
+
     step, idx, mode = model_name.split('_')[-3 :]
     step = int(step)
     
     if 'dense' in model_name or retraining:
-        epochs = 1
+        epochs = 1 if not retraining else int(retraining)
     else:
         epochs = max(1, step // 2 + 1)
         if '_split_' in model_name: epochs = max(2, epochs)
+        if _is_barthez(model_name): epochs += 1
+        if '_big_' in model_name: epochs += 1
 
     if step < 2:
         batch_size = 3
@@ -171,6 +195,11 @@ def training_config_from_name(model_name, retraining = False, ** kwargs):
     if use_doc: batch_size = max(1, batch_size // 2)
     if '_split_' in model_name: batch_size = max(1, batch_size // 2)
     
+    if _is_barthez(model_name) and '_split_' in model_name: batch_size = batch_size * 3
+    if '_big_' in model_name and 'french_squad' in model_name: batch_size = max(1, batch_size - 1)
+    
+    max_texts = 4 if '_split_' not in model_name else 3
+    
     config.update({
         'epochs'    : epochs,
         'batch_size'    : batch_size,
@@ -178,7 +207,7 @@ def training_config_from_name(model_name, retraining = False, ** kwargs):
         
         'use_multi_input'   : use_doc,
         'merge_multi_input' : True if 'ib' in model_name else False,
-        'max_input_texts'   : 4 if '_split_' not in model_name else 3,
+        'max_input_texts'   : max_texts if use_doc or '_split_' in model_name else -1,
         'max_split_sentences'   : 5,
         'max_sentence_length'   : 128
     })
@@ -193,9 +222,10 @@ def testing_config_from_name(model_name, test_name, ** kwargs):
         step, idx = int(step), int(idx)
 
     datasets = [
-        ds_name for ds_name in ['squad', 'coqa', 'newsqa', 'qangaroo'] if ds_name in test_name
+        ds_name for ds_name in ALLOWED_DATASETS if ds_name in test_name
     ]
-    if len(datasets) == 0 or 'nq' in test_name: datasets.append('nq')
+    if len(datasets) == 0: datasets.append('nq')
+    if 'french_squad' in datasets: datasets.remove('squad')
 
     use_doc = True if 'doc' in test_name else False
 
@@ -230,9 +260,10 @@ def testing_config_from_name(model_name, test_name, ** kwargs):
         'eval_infer_config'     : {} if 'top5' not in test_name else {'method' : 'beam'},
         
         'max_input_length'      : 512,
+        'max_multi_input_length'    : 512,
         'max_output_length'     : 32 * 3,
         
-        'run_eagerly'   : True,
+        #'run_eagerly'   : True,
         ** kwargs
     }
     
@@ -335,7 +366,7 @@ def build_and_train(name, allow_retraining, ** default_config):
             name, "retraining it for 1 epoch" if allow_retraining else "skipping it."
         ))
         if not allow_retraining: return True
-        retraining = True
+        retraining = allow_retraining
     
         
     if not is_model_name(name):
