@@ -167,12 +167,13 @@ class BaseNLUModel(BaseTextModel):
         if isinstance(pretrained, str):
             kwargs.setdefault('pretrained_name', pretrained)
         super(BaseNLUModel, self).__init__(pretrained = pretrained, ** kwargs)
+        
+        if hasattr(self.model, 'set_tokens'): self.model.set_tokens(** self.model_tokens)
     
     def _build_model(self, pretrained = None, ** kwargs):
         if self.input_multi_format: kwargs['wrapper'] = MAGWrapper
             
         if pretrained is not None:
-            kwargs.update({'return_attention' : False, 'return_hidden_states' : False})
             super(BaseNLUModel, self)._build_model(
                 model = get_pretrained_transformer(pretrained, ** kwargs)
             )
@@ -208,12 +209,12 @@ class BaseNLUModel(BaseTextModel):
     @property
     def input_signature(self):
         signature = ()
-        if self.input_format: signature += self.text_signature
+        if self.input_format: signature += (self.text_signature, )
         if self.input_multi_format:
             if self.use_multi_input or self.split_multi_input:
-                signature += self.multi_text_signature
+                signature += (self.multi_text_signature, )
             else:
-                signature += self.text_signature
+                signature += (self.text_signature, )
         return signature
     
     @property
@@ -280,8 +281,8 @@ class BaseNLUModel(BaseTextModel):
             )
             if self.split_multi_input:
                 des += "- Max sentences per split : {}\n".format(self.max_split_sentences)
-            des += "- # of embedding layers : {}\n".format(len(self.encoder.embedding_layers))
             des += "- # of memory layers : {}\n".format(len(self.encoder.memory_layers))
+            des += "- # of embedding layers : {}\n".format(len(self.encoder.embedding_layers))
             des += "- Subsampling factor : {}\n".format(self.subsampling_factor)
             des += "- Subsampling mode : {}\n".format(
                 self.model.hparams.encoder_subsampling_mode
@@ -302,9 +303,9 @@ class BaseNLUModel(BaseTextModel):
                         ** kwargs
                        ):
         if self.input_multi_format is None: return {}
+        if self.is_encoder_decoder and is_call: inputs = inputs[0]
         
-        n_multi_input = len(inputs) // 2
-        if self.is_encoder_decoder and is_call: n_multi_input -= 1
+        n_multi_input = len(inputs)
         if self.input_format is not None: n_multi_input -= 1
         
         not_subsampling = force_not_subsampling if self.subsample_input else (
@@ -316,10 +317,11 @@ class BaseNLUModel(BaseTextModel):
             + [self.multi_input_offset] * n_multi_input
         )
         
+        prefix = '' if not self.is_encoder_decoder else 'encoder_'
         return {
-            'merge_embeddings'  : merge_multi_input or (training and self.in_batch_merging),
-            'force_not_subsampling' : not_subsampling,
-            'encoder_positional_offset' : positional_offset
+            '{}merge_embeddings'.format(prefix) : merge_multi_input or (training and self.in_batch_merging),
+            '{}force_not_subsampling'.format(prefix) : not_subsampling,
+            '{}positional_offset'.format(prefix) : positional_offset
         }
         
     @timer(name = 'prediction', log_if_root = False)
@@ -336,17 +338,9 @@ class BaseNLUModel(BaseTextModel):
             training    = training,
             merge_multi_input = merge_multi_input,
             force_not_subsampling   = force_not_subsampling,
-            ** kwargs
         ))
         
-        return self.model(
-            inputs,
-            training                = training,
-            return_attention        = False,
-            return_hidden_states    = False,
-            return_mask             = False,
-            ** kwargs
-        )
+        return self.model(inputs, training = training, ** kwargs)
 
     def infer(self, inputs, training = False, ** kwargs):
         return self(inputs, training = training, ** kwargs)
@@ -360,9 +354,18 @@ class BaseNLUModel(BaseTextModel):
     def format_output(self, * args, ** kwargs):
         return self.format_text(self.output_format, * args, ** kwargs)
     
-    def tf_format_data(self, text_format, data,
-                       multi_format = False, split = False,
-                       default_keys = None, default_mapping = None, ** kwargs):
+    def tf_format_data(self,
+                       text_format,
+                       data,
+                       
+                       split    = False,
+                       multi_format = False,
+                       
+                       default_keys = None,
+                       default_mapping = None,
+                       
+                       ** kwargs
+                      ):
         if default_mapping is not None:
             kwargs['keys_mapping'] = default_mapping
             kwargs.setdefault('keys', default_keys if default_keys is not None else default_mapping)
@@ -380,33 +383,32 @@ class BaseNLUModel(BaseTextModel):
         return self.tf_format_text(text_format, data, ** kwargs)
     
     def tf_format_input(self, data, ** kwargs):
+        """ Returns the formatted single input (according to `self.input_format`) """
         return self.tf_format_data(
-            self.input_format, data, multi_format = False, default_keys = self.input_keys,
-            default_mapping = self.input_mapping, ** kwargs
-        )
-    
-    def tf_format_output(self, data, ** kwargs):
-        return self.tf_format_data(
-            self.output_format, data, multi_format = False, default_keys = self.output_keys,
-            default_mapping = self.output_mapping, ** kwargs
+            self.input_format,
+            data,
+            split   = False,
+            multi_format    = False,
+            default_keys    = self.input_keys,
+            default_mapping = self.input_mapping,
+            ** kwargs
         )
     
     def tf_multi_format_input(self, data, ** kwargs):
+        """ Returns the formatted multi inputs (according to `self.input_multi_format`) """
         if self.input_multi_format is None:
-            raise ValueError('`self.input_multi_format` is None')
+            raise RuntimeError('`self.input_multi_format` is None')
         
-        kwargs.setdefault('max_texts', self.max_input_texts)
-        kwargs.setdefault('select_mode', self.input_select_mode)
-        kwargs.setdefault('min_length', self.min_multi_input_length)
+        kwargs.setdefault('max_texts',      self.max_input_texts)
+        kwargs.setdefault('select_mode',    self.input_select_mode)
+        
+        kwargs.setdefault('min_length',     self.min_multi_input_length)
         kwargs.setdefault('sort_by_length', self.sort_by_length)
-        kwargs.setdefault('max_total_length', self.max_total_length)
-        if isinstance(data, (dict, pd.Series)) and 'valid_idx' in data:
-            kwargs.setdefault('required_idx', data['valid_idx'])
+        kwargs.setdefault('max_total_length',   self.max_total_length)
         
         if self.split_multi_input:
-            kwargs['split'] = True
-            kwargs.setdefault('max_length', self.max_multi_input_length)
-            kwargs.setdefault('max_sentences', self.max_split_sentences)
+            kwargs.setdefault('max_length',     self.max_multi_input_length)
+            kwargs.setdefault('max_sentences',  self.max_split_sentences)
             kwargs.setdefault(
                 'max_sentences_length', self.max_sentence_length if self.max_sentence_length > 0 else self.max_input_length
             )
@@ -415,21 +417,33 @@ class BaseNLUModel(BaseTextModel):
                 'max_length', self.max_multi_input_length if self.max_multi_input_length > 0 else self.max_input_length
             )
 
-        tokens, lengths = self.tf_format_data(
-            self.input_multi_format, data, multi_format = self.use_multi_input,
-            default_keys = self.multi_keys, default_mapping = self.multi_mapping, ** kwargs
-        )
-        
-        if logger.isEnabledFor(logging.DEBUG):
-            tf.print('Selected inputs (total length :', tf.reduce_sum(lengths), ') :', lengths)
-        
-        return (tokens, lengths) if len(tf.shape(tokens)) > 1 else (tokens, len(tokens))
-    
-    def tf_multi_format_output(self, data, ** kwargs):
+        if isinstance(data, (dict, pd.Series)) and 'valid_idx' in data:
+            kwargs.setdefault('required_idx', data['valid_idx'])
+
         return self.tf_format_data(
-            self.output_format, data, multi_format = True, default_keys = self.output_keys,
-            default_mapping = self.output_mapping, ** kwargs
+            self.input_multi_format,
+            data,
+            split   = self.split_multi_input,
+            multi_format = self.use_multi_input,
+            default_keys = self.multi_keys,
+            default_mapping = self.multi_mapping,
+            ** kwargs
         )
+    
+    def tf_format_output(self, data, multi_format = False, ** kwargs):
+        """ Returns the formatted single input (according to `self.output_format`) """
+        return self.tf_format_data(
+            self.output_format,
+            data,
+            split   = False,
+            multi_format    = multi_format,
+            default_keys    = self.output_keys,
+            default_mapping = self.output_mapping,
+            ** kwargs
+        )
+
+    def tf_multi_format_output(self, data, ** kwargs):
+        return self.tf_format_output(data, multi_format = True, ** kwargs)
 
     def get_input(self, data, ** kwargs):
         """
@@ -437,12 +451,10 @@ class BaseNLUModel(BaseTextModel):
         """
         inputs = ()
         if self.input_format is not None:
-            tokens, _ = self.tf_format_input(data, ** kwargs)
-            inputs += (tokens, len(tokens))
+            inputs += (self.tf_format_input(data, ** kwargs), )
         
         if self.input_multi_format is not None:
-            tokens, lengths = self.tf_multi_format_input(data, ** kwargs)
-            inputs += (tokens, lengths)
+            inputs += (self.tf_multi_format_input(data, ** kwargs), )
         
         return inputs
     
@@ -458,6 +470,9 @@ class BaseNLUModel(BaseTextModel):
     
     def filter_input(self, inputs):
         """ Check `is_valid_tokens` for information """
+        if self.is_encoder_decoder: inputs = inputs[0]
+        if not isinstance(inputs, tuple): inputs = (inputs, )
+        
         valid = True
 
         if self.input_format is not None:
@@ -467,19 +482,16 @@ class BaseNLUModel(BaseTextModel):
             if self.split_multi_input: max_multi_length = self.max_sentence_length
             elif self.max_multi_input_length is not None: max_multi_length = self.max_multi_input_length
             else: max_multi_length = self.max_input_length
-            valid = is_valid_tokens(inputs[-2], max_length = max_multi_length)
+            valid = is_valid_tokens(inputs[-1], max_length = max_multi_length)
             
             if valid and self.split_multi_input and self.max_split_sentences > 0:
-                valid = valid and tf.shape(inputs[-2])[0] <= self.max_split_sentences
+                valid = valid and tf.shape(inputs[-1])[0] <= self.max_split_sentences
             
-            if len(tf.shape(inputs[-1])) > 0:
-                if self.max_input_texts > 0:
-                    valid = valid and tf.shape(inputs[-1])[0] <= self.max_input_texts * (
-                        1 if not self.split_multi_input else max(self.max_split_sentences, 1)
-                    )
 
-                if self.max_total_length > 0:
-                    valid = valid and tf.reduce_sum(inputs[-1]) <= self.max_total_length
+            if self.max_input_texts > 0:
+                valid = valid and tf.shape(inputs[-1])[0] <= self.max_input_texts * (
+                    1 if not self.split_multi_input else max(self.max_split_sentences, 1)
+                )
         
         return valid
     
@@ -560,12 +572,14 @@ class BaseNLUModel(BaseTextModel):
             if isinstance(infos, list):
                 pad_values  = self.get_dataset_config()['pad_kwargs']['padding_values'][0]
                 encoded     = [info['encoded'] for info in infos]
-                batch_inputs = [
-                    tf.convert_to_tensor(pad_batch(inp, pad_value = pad_value))
-                    for (inp, pad_value) in zip(zip(* encoded), pad_values)
-                ]
+                batch_inputs = tf.nest.map_structure(
+                    lambda * inp: tf.cast(pad_batch(inp[:-1], pad_value = inp[-1])),
+                    * encoded, pad_values
+                )
             else:
-                batch_inputs = [tf.expand_dims(inp, axis = 0) for inp in infos['encoded']]
+                batch_inputs    = tf.nest.map_structure(
+                    lambda t: tf.expand_dims(t, axis = 0), infos['encoded']
+                )
             
             logger.info('Inputs shape : {} - config : {}'.format(
                 [tuple(inp.shape) for inp in batch_inputs], kwargs

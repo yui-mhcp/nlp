@@ -39,15 +39,17 @@ class BaseNLUGenerator(BaseNLUModel):
     def input_signature(self):
         signature = super().input_signature
         
-        if self.is_encoder_decoder: signature = signature + self.text_signature
-        return signature
+        if not self.is_encoder_decoder: return signature
+        return (signature, self.text_signature)
     
     @property
     def output_signature(self):
-        signature = self.multi_text_signature
-        if self.is_encoder_decoder:
-            return signature
-        return signature + (tf.TensorSpec(shape = (None, ), dtype = tf.int32), )
+        if self.is_encoder_decoder: return self.text_signature
+        return (
+            self.text_signature,
+            tf.TensorSpec(shape = (None, ), dtype = tf.int32),  # text length
+            tf.TensorSpec(shape = (None, ), dtype = tf.int32)   # skip length (= input's length)
+        )
 
     @property
     def encoder(self):
@@ -60,26 +62,14 @@ class BaseNLUGenerator(BaseNLUModel):
     @timer(name = 'inference', log_if_root = False)
     def infer(self,
               text,
-              text_length   = None,
               training      = False,
               merge_multi_input = False,
               force_not_subsampling = False,
-              return_attention = False,
               ** kwargs
              ):
         kwargs.setdefault('max_length', self.max_output_length)
-        if text_length is None and isinstance(text, (list, tuple)) and len(text) == 2:
-            text, text_length = text
-        
         if not isinstance(text, (list, tuple)):
             if len(tf.shape(text)) == 1: text = tf.expand_dims(text, axis = 0)
-            
-            if text_length is None:
-                text_length = tf.fill([tf.shape(text)[0]], tf.shape(text)[1])
-            elif len(tf.shape(text_length)) == 0:
-                text_length = tf.expand_dims(text_length, axis = 0)
-            
-            text = [text, text_length]
         
         kwargs.update(self._get_mag_config(
             text,
@@ -90,17 +80,7 @@ class BaseNLUGenerator(BaseNLUModel):
             ** kwargs
         ))
         
-        return self.model.infer(
-            text,
-            training                = training,
-            return_attention        = return_attention,
-            return_hidden_states    = False,
-            return_mask             = False,
-            ** kwargs
-        )
-    
-    def decode_output(self, output, ** kwargs):
-        return self.decode_text(output.tokens)
+        return self.model.infer(text, training = training, ** kwargs)
     
     def compile(self,
                 loss        = 'TextLoss',
@@ -127,67 +107,42 @@ class BaseNLUGenerator(BaseNLUModel):
         return super().tf_multi_format_output(data, ** kwargs)
     
     def get_output(self, data, inputs = None, ** kwargs):
-        tokens, lengths = self.tf_multi_format_output(data, ** kwargs)
-        
-        return tokens, lengths
+        return self.tf_format_output(data, ** kwargs)
 
     def encode_data(self, data):
         inputs, outputs = super().encode_data(data)
 
-        if not self.is_encoder_decoder and len(inputs) == 2:
-            inp_tokens, inp_length = inputs
-            out_tokens, out_length = outputs
+        if self.is_encoder_decoder:
+            inputs, outputs = (inputs, outputs[:-1]), outputs[1:]
+        elif isinstance(inputs, tuple):
+            raise NotImplementedError()
+        else:
+            tokens  = tf.concat([inputs, outputs], axis = -1)
             
-            tokens  = tf.concat([inp_tokens[:-1], out_tokens[1:]], axis = -1)
-            
-            inputs  = (tokens, inp_length + out_length - 2)
-            outputs = (tokens, out_length - 1, inp_length - 1)
+            inputs, outputs = tokens[:-1], (tokens[1:], len(tokens) - 1, len(inputs))
 
         return inputs, outputs
     
     def filter_output(self, outputs):
         """ Check `is_valid_tokens` for information """
-        return is_valid_tokens(outputs[0], max_length = self.max_output_length)
-    
-    def augment_data(self, inputs, outputs):
-        inp_tokens, inp_length = inputs[:2]
-        
-        inp_tokens, inp_length = self.augment_text(inp_tokens, inp_length)
-        
-        return (inp_tokens, inp_length) + inputs[2:], outputs
-    
-    def preprocess_data(self, inputs, outputs):
-        if self.is_encoder_decoder:
-            out_tokens, out_length = outputs
-            out_in_tokens, out_in_length    = out_tokens[..., :-1], out_length - 1
-            
-            if len(tf.shape(out_in_tokens)) == 3:
-                out_in_tokens, out_in_length = out_in_tokens[:, 0], out_in_length[:, 0]
-            
-            return inputs + (out_in_tokens, out_in_length), (out_tokens[..., 1:], out_length - 1)
-        
-        inp_tokens, inp_lengths = inputs
-        out_tokens, out_lengths, skip_length = outputs
-        return (
-            (inp_tokens[:, :-1], inp_lengths - 1),
-            (out_tokens[:, 1:], out_lengths, skip_length - 1)
-        )
+        return is_valid_tokens(outputs, max_length = self.max_output_length)
     
     def get_dataset_config(self, ** kwargs):
         inp_signature, out_signature = self.input_signature, self.output_signature
-        if self.is_encoder_decoder: inp_signature = inp_signature[:-2]
         
         kwargs.update({
             'batch_before_map'  : True,
             'padded_batch'      : True,
             'pad_kwargs'        : {
                 'padded_shapes'     : (
-                    tuple([tuple(sign.shape)[1:] for sign in inp_signature]),
-                    tuple([tuple(sign.shape)[1:] for sign in out_signature])
+                    tf.nest.map_structure(lambda sign: tuple(sign.shape)[1:], inp_signature),
+                    tf.nest.map_structure(lambda sign: tuple(sign.shape)[1:], out_signature)
                 ),
                 'padding_values'    : (
-                    tuple([self.blank_token_idx, 0] * (len(inp_signature) // 2)),
-                    tuple([self.blank_token_idx] + [0] * (len(out_signature) - 1))
+                    tf.nest.map_structure(lambda sign: self.blank_token_idx, inp_signature),
+                    tf.nest.map_structure(
+                        lambda sign: self.blank_token_idx if len(sign.shape) > 1 else 0, out_signature
+                    )
                 )
             }
         })
@@ -208,12 +163,10 @@ class BaseNLUGenerator(BaseNLUModel):
     @timer
     def predict_with_target(self, batch, epoch = None, step = None, prefix = None, 
                             directory = None, n_pred = 5, ** kwargs):
-        inputs, output = batch
-        inputs  = [inp[:n_pred] for inp in inputs]
-        outputs = [out[:n_pred] for out in output]
+        inputs, outputs = tf.nest.map_structure(lambda t: t[:n_pred], batch)
         
-        out_tokens, out_length  = outputs[:2]
-        infer_inputs    = inputs[:-2] if self.is_encoder_decoder else inputs
+        out_tokens      = outputs[0] if isinstance(outputs, tuple) else outputs
+        infer_inputs    = inputs[0] if self.is_encoder_decoder else inputs
         
         pred    = self(inputs, training = False, ** kwargs)
         infer   = self.infer(

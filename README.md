@@ -2,6 +2,8 @@
 
 This github is an extension of the [@Ananas120 Master thesis' repository](https://github.com/Ananas120/mag), extending [my base project](https://github.com/yui-mhcp/base_dl_project) to Q&A. I have generalized and cleaned up his code to allow general NLP tasks (and not only Q&A). Thanks to him for his contribution ! :smile:
 
+**NEW : [CHANGELOG](https://github.com/yui-mhcp/yui-mhcp/blob/main/CHANGELOG.md) file ! Check it to have a global overview of the latest modifications !** :yum:
+
 ## Project structure
 
 ```bash
