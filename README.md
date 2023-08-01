@@ -2,7 +2,9 @@
 
 This github is an extension of the [@Ananas120 Master thesis' repository](https://github.com/Ananas120/mag), extending [my base project](https://github.com/yui-mhcp/base_dl_project) to Q&A. I have generalized and cleaned up his code to allow general NLP tasks (and not only Q&A). Thanks to him for his contribution ! :smile:
 
-**NEW : [CHANGELOG](https://github.com/yui-mhcp/yui-mhcp/blob/main/CHANGELOG.md) file ! Check it to have a global overview of the latest modifications !** :yum:
+Check the [CHANGELOG](https://github.com/yui-mhcp/yui-mhcp/blob/main/CHANGELOG.md) file to have a global overview of the latest modifications ! :yum:
+
+**IMPORTANT NOTE** : This project has not been deeply tested since some months, some features may not properly work. This project will be refactored in the near future with new fancy models and features !
 
 ## Project structure
 
@@ -101,6 +103,7 @@ Models must be unzipped in the `pretrained_models/` directory !
 - [x] Add pretrained models (for Q&A in English) (Ananas120's master thesis models)
 - [ ] Add new languages support
 - [ ] Add document parsing to perform Q&A on document (in progress)
+- [ ] Convert the `llama2` model to `tensorflow`
 
 ## NLP vs NLU
 
