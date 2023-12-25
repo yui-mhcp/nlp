@@ -4,7 +4,7 @@ This github is an extension of the [@Ananas120 Master thesis' repository](https:
 
 Check the [CHANGELOG](https://github.com/yui-mhcp/yui-mhcp/blob/main/CHANGELOG.md) file to have a global overview of the latest modifications ! :yum:
 
-**IMPORTANT NOTE** : This project has not been deeply tested since some months, some features may not properly work. This project will be refactored in the near future with new fancy models and features !
+**IMPORTANT NOTE** : This project is currently updated, meaning that multiple features may not currently work ! They will be updated in the near future with new fancy applications and models ! :smile:
 
 ## Project structure
 

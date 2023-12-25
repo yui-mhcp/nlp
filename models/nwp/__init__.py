@@ -9,16 +9,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from models.nlu.base_nlu_generator import BaseNLUGenerator
+from models.nwp.text_generator import TextGenerator
 
-class QuestionGenerator(BaseNLUGenerator):
-    def __init__(self,
-                 * args,
-                 input_format   = '{answer}{sep_token}{context}',
-                 output_format  = '{question}',
-                 ** kwargs
-                ):
-        super().__init__(
-            * args, input_format = input_format, output_format = output_format, ** kwargs
-        )
-    
+_models = {
+    'TextGenerator' : TextGenerator
+}

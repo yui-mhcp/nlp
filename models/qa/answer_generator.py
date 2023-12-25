@@ -1,4 +1,4 @@
-# Copyright (C) 2022 Quentin L. & yui-mhcp project's author. All rights reserved.
+# Copyright (C) 2022-now yui-mhcp project's author. All rights reserved.
 # Licenced under the Affero GPL v3 Licence (the "Licence").
 # you may not use this file except in compliance with the License.
 # See the "LICENCE" file at the root of the directory for the licence information.
@@ -14,7 +14,7 @@ from models.nlu.base_nlu_generator import BaseNLUGenerator
 class AnswerGenerator(BaseNLUGenerator):
     def __init__(self,
                  * args,
-                 input_format   = ['{question}', '{context}'],
+                 input_format   = '{question}{sep_token}{context}',
                  output_format  = '{answer}',
                  ** kwargs
                 ):

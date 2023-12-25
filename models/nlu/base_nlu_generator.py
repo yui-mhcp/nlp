@@ -1,4 +1,4 @@
-# Copyright (C) 2022 Quentin L. & yui-mhcp project's author. All rights reserved.
+# Copyright (C) 2023-now yui-mhcp project's author. All rights reserved.
 # Licenced under the Affero GPL v3 Licence (the "Licence").
 # you may not use this file except in compliance with the License.
 # See the "LICENCE" file at the root of the directory for the licence information.
@@ -10,30 +10,45 @@
 # limitations under the License.
 
 import logging
+import pandas as pd
 import tensorflow as tf
 
 from loggers import timer
 from models.nlu.base_nlu_model import BaseNLUModel
-from models.nlu.nlu_utils import DEFAULT_MAX_OUTPUT_LENGTH, infer_to_str, is_valid_tokens
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MAX_OUTPUT_LENGTH   = 1024
+
 class BaseNLUGenerator(BaseNLUModel):
-    def __init__(self, * args, max_output_length = 1024, pretrained = 'facebook/bart-large', ** kwargs):
+    output_signature    = BaseNLUModel.text_signature
+    
+    def __init__(self,
+                 * args,
+                 prompt = None,
+                 pretrained = 'facebook/bart-large',
+                 max_output_length = 1024,
+                 ** kwargs
+                ):
+        self.prompt = prompt
         self.max_output_length = max_output_length
 
-        self.show_input = kwargs.get('show_input', True)
+        if self.prompt and '{prompt}' not in kwargs.get('input_format', '{text}'):
+            raise RuntimeError('`prompt` is provided but not used in `input_format` !')
+
         super(BaseNLUGenerator, self).__init__(* args, pretrained = pretrained, ** kwargs)
+        
+        if not self.output_format:
+            if self.use_multi_input: raise NotImplementedError()
+            self.output_format = self.input_format
     
     @property
-    def training_hparams(self):
-        return super(BaseNLUGenerator, self).training_hparams(
-            max_output_length = None, teacher_forcing_eval = True, eval_infer_config = {}, show_input = None
-        )
-
-    @property
     def is_encoder_decoder(self):
-        return hasattr(self.model, 'decoder') and self.model.decoder is not None
+        return getattr(self.model, 'decoder', None) is not None
+    
+    @property
+    def is_nwp(self):
+        return self.input_format == self.output_format and not self.use_multi_input
     
     @property
     def input_signature(self):
@@ -41,91 +56,65 @@ class BaseNLUGenerator(BaseNLUModel):
         
         if not self.is_encoder_decoder: return signature
         return (signature, self.text_signature)
-    
-    @property
-    def output_signature(self):
-        if self.is_encoder_decoder: return self.text_signature
-        return (
-            self.text_signature,
-            tf.TensorSpec(shape = (None, ), dtype = tf.int32),  # text length
-            tf.TensorSpec(shape = (None, ), dtype = tf.int32)   # skip length (= input's length)
-        )
 
     @property
-    def encoder(self):
-        return self.model.encoder
-    
-    @property
-    def decoder(self):
-        return self.model.decoder
+    def training_hparams(self):
+        return super(BaseNLUGenerator, self).training_hparams(
+            max_output_length   = None,
+            teacher_forcing_eval    = True,
+            eval_infer_config   = {},
+            show_input  = None
+        )
 
     @timer(name = 'inference', log_if_root = False)
-    def infer(self,
-              text,
-              training      = False,
-              merge_multi_input = False,
-              force_not_subsampling = False,
-              ** kwargs
-             ):
+    def infer(self, * args, ** kwargs):
         kwargs.setdefault('max_length', self.max_output_length)
-        if not isinstance(text, (list, tuple)):
-            if len(tf.shape(text)) == 1: text = tf.expand_dims(text, axis = 0)
-        
-        kwargs.update(self._get_mag_config(
-            text,
-            is_call     = False,
-            training    = training,
-            merge_multi_input = merge_multi_input,
-            force_not_subsampling   = force_not_subsampling,
-            ** kwargs
-        ))
-        
-        return self.model.infer(text, training = training, ** kwargs)
+        return super().infer(* args, ** kwargs)
     
-    def compile(self,
-                loss        = 'TextLoss',
-                loss_config = {},
-                metrics     = ['TextAccuracy', 'F1'],
-                metrics_config  = {},
-                optimizer_config    = {'lr' : 1e-5},
-                ** kwargs
-               ):
-        loss_config['pad_value']    = self.blank_token_idx
-        metrics_config.update(self.default_metrics_config)
+    def compile(self, loss = 'TextLoss', metrics = ['TextAccuracy'], ** kwargs):
+        kwargs.setdefault('loss_config', {}).update({
+            'pad_value' : self.blank_token_idx, 'eos_value' : self.blank_token_idx
+        })
+        kwargs.setdefault('metrics_config', {}).update(self.default_metrics_config)
+        kwargs.setdefault('optimizer_config', {}).setdefault('lr', 1e-4)
         
-        super().compile(
-            loss    = loss,
-            metrics = metrics,
-            loss_config = loss_config,
-            metrics_config  = metrics_config,
-            optimizer_config    = optimizer_config,
-            ** kwargs
-        )
+        super().compile(loss = loss, metrics = metrics, ** kwargs)
+
+    def format_input(self, * args, prompt = None, ** kwargs):
+        if prompt is None: prompt = self.prompt
+        if prompt is not None: kwargs['prompt'] = prompt
+        return super().format_input(* args, ** kwargs)
     
-    def tf_multi_format_output(self, data, ** kwargs):
-        kwargs.setdefault('max_length', self.max_output_length)
-        return super().tf_multi_format_output(data, ** kwargs)
-    
-    def get_output(self, data, inputs = None, ** kwargs):
-        return self.tf_format_output(data, ** kwargs)
+    def get_output(self, data = None, inputs = None, ** kwargs):
+        if self.input_format == self.output_format and not self.use_multi_input: return inputs
+        return super().get_output(data = data, inputs = inputs, ** kwargs)
 
     def encode_data(self, data):
         inputs, outputs = super().encode_data(data)
 
         if self.is_encoder_decoder:
-            inputs, outputs = (inputs, outputs[:-1]), outputs[1:]
+            if not isinstance(outputs, tuple):
+                inputs, outputs = (inputs, outputs[:-1]), outputs[1:]
+            else:
+                inputs, outputs = (inputs, outputs[0][:-1]), (outputs[0][1:], ) + outputs[1:]
         elif isinstance(inputs, tuple):
             raise NotImplementedError()
+        elif isinstance(outputs, tuple):
+            if self.sos_token: outputs = (outputs[0][1:], ) + outputs[1:]
+            if self.eos_token: inputs  = inputs[:-1]
+            inputs = tf.concat([inputs, outputs[0]], axis = -1)
         else:
-            tokens  = tf.concat([inputs, outputs], axis = -1)
-            
-            inputs, outputs = tokens[:-1], (tokens[1:], len(tokens) - 1, len(inputs))
+            if self.sos_token: outputs = outputs[1:]
+            if self.eos_token: inputs  = inputs[:-1]
+            inputs = tf.concat([inputs, outputs], axis = -1)
 
         return inputs, outputs
     
     def filter_output(self, outputs):
-        """ Check `is_valid_tokens` for information """
-        return is_valid_tokens(outputs, max_length = self.max_output_length)
+        if isinstance(outputs, tuple): outputs = outputs[0]
+        return tf.logical_and(
+            tf.shape(outputs)[0] > 0, tf.shape(outputs)[-1] <= self.max_output_length
+        )
     
     def get_dataset_config(self, ** kwargs):
         inp_signature, out_signature = self.input_signature, self.output_signature
@@ -134,14 +123,13 @@ class BaseNLUGenerator(BaseNLUModel):
             'batch_before_map'  : True,
             'padded_batch'      : True,
             'pad_kwargs'        : {
-                'padded_shapes'     : (
-                    tf.nest.map_structure(lambda sign: tuple(sign.shape)[1:], inp_signature),
-                    tf.nest.map_structure(lambda sign: tuple(sign.shape)[1:], out_signature)
-                ),
                 'padding_values'    : (
                     tf.nest.map_structure(lambda sign: self.blank_token_idx, inp_signature),
                     tf.nest.map_structure(
-                        lambda sign: self.blank_token_idx if len(sign.shape) > 1 else 0, out_signature
+                        lambda sign: tf.constant(
+                            0, dtype = sign.dtype
+                        ) if sign.dtype != tf.int32 else self.blank_token_idx,
+                        out_signature
                     )
                 )
             }
@@ -155,7 +143,7 @@ class BaseNLUGenerator(BaseNLUModel):
         if self.teacher_forcing_eval:
             y_pred = self(inputs, training = False)
         else:
-            if self.is_encoder_decoder: inputs = inputs[:-2]
+            if self.is_encoder_decoder: inputs = inputs[:-1]
             y_pred = self.infer(inputs, training = False, ** self.eval_infer_config).tokens
 
         return self.update_metrics(target, y_pred)
@@ -166,7 +154,8 @@ class BaseNLUGenerator(BaseNLUModel):
         inputs, outputs = tf.nest.map_structure(lambda t: t[:n_pred], batch)
         
         out_tokens      = outputs[0] if isinstance(outputs, tuple) else outputs
-        infer_inputs    = inputs[0] if self.is_encoder_decoder else inputs
+        infer_inputs    = inputs[:-1] if self.is_encoder_decoder else inputs
+        if len(infer_inputs) == 1: infer_inputs = infer_inputs[0]
         
         pred    = self(inputs, training = False, ** kwargs)
         infer   = self.infer(
@@ -177,7 +166,7 @@ class BaseNLUGenerator(BaseNLUModel):
         )
         
         pred_text   = self.decode_text(pred)
-        infer_text  = self.decode_text(infer.tokens)
+        infer_text  = self.decode_text(infer)
         
         input_text  = self.decode_text(inputs[0]) if self.show_input else None
         target_text = self.decode_text(out_tokens)
@@ -189,12 +178,27 @@ class BaseNLUGenerator(BaseNLUModel):
                 "" if input_text is None else "  Input      : {}\n".format(input_text[i]),
                 target_text[i],
                 pred_text[i],
-                '' if infer_text is None else infer_to_str(infer_text[i], infer.score[i], indent = 2)
+                infer_to_str(
+                    infer_text[i], infer.scores[i], indent = 2
+                ) if infer_text is not None else ''
             ))
         
         logger.info("\n".join(preds))
         
     def get_config(self, * args, ** kwargs):
         config = super().get_config(* args, ** kwargs)
-        config['max_output_length'] = self.max_output_length
+        config.update({
+            'prompt'    : self.prompt,
+            'max_output_length' : self.max_output_length
+        })
         return config
+    
+def infer_to_str(text, score, indent = 0):
+    _indentation = ' ' * indent
+    if not isinstance(text, (list, tuple)):
+        return '{}Inference ({:.3f}) : {}'.format(_indentation, score, text)
+    
+    des = '{}Inference :'.format(_indentation)
+    for j, (s, txt) in enumerate(zip(score, text)):
+        des += '\n{}  #{} ({:.3f}) : {}'.format(_indentation, j, s, txt)
+    return des
