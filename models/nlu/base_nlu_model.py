@@ -17,7 +17,8 @@ import pandas as pd
 import tensorflow as tf
 
 from loggers import timer, time_logger
-from utils.generic_utils import normalize_key
+from utils.text import get_encoder
+from utils.generic_utils import normalize_keys
 from models.interfaces.base_text_model import BaseTextModel
 from custom_architectures.transformers_arch import get_pretrained_transformer
 from custom_architectures.transformers_arch.mag_wrapper import MAGWrapper
@@ -72,6 +73,9 @@ class BaseNLUModel(BaseTextModel):
                  
                  ** kwargs
                 ):
+        if pretrained and 'text_encoder' not in kwargs:
+            kwargs['text_encoder'] = get_encoder(lang = None, text_encoder = pretrained)
+
         self._init_text(lang = lang, ** kwargs)
         
         self.input_format   = input_format
@@ -98,6 +102,7 @@ class BaseNLUModel(BaseTextModel):
         if isinstance(pretrained, str): kwargs.setdefault('pretrained_name', pretrained)
         super(BaseNLUModel, self).__init__(pretrained = pretrained, ** kwargs)
         
+        if hasattr(self.model, '_build'):     self.model._build()
         if hasattr(self.model, 'set_tokens'): self.model.set_tokens(** self.model_tokens)
     
     def _build_model(self, pretrained = None, ** kwargs):
@@ -274,11 +279,11 @@ class BaseNLUModel(BaseTextModel):
         return self(inputs, training = training, ** kwargs)
     
     def format_input(self, * args, ** kwargs):
-        kwargs = {normalize_key(k, _alternative_keys) : v for k, v in kwargs.items()}
+        kwargs = normalize_keys(kwargs, _alternative_keys)
         return self.format_text(self.input_format, * args, ** kwargs)
     
     def format_multi_input(self, * args, flatten = True, ** kwargs):
-        kwargs = {normalize_key(k, _multi_alternative_keys) : v for k, v in kwargs.items()}
+        kwargs = normalize_keys(kwargs, _multi_alternative_keys)
         kwargs.update(self.filter_multi_input_config)
         if self.split_multi_input:
             kwargs.update({'split_key' : self.split_key, 'max_length' : self.max_sentence_length})
@@ -292,11 +297,11 @@ class BaseNLUModel(BaseTextModel):
         return self.multi_format_text(self.multi_input_format, * args, ** kwargs)
     
     def format_output(self, * args, ** kwargs):
-        kwargs = {normalize_key(k, _alternative_keys) : v for k, v in kwargs.items()}
+        kwargs = normalize_keys(kwargs, _alternative_keys)
         return self.format_text(self.output_format, * args, ** kwargs)
     
     def multi_format_output(self, * args, ** kwargs):
-        kwargs = {normalize_key(k, _multi_alternative_keys) : v for k, v in kwargs.items()}
+        kwargs = normalize_keys(kwargs, _multi_alternative_keys)
         return self.multi_format_text(self.output_format, * args, ** kwargs)
     
     def get_input(self, data = None, ** kwargs):
@@ -312,10 +317,11 @@ class BaseNLUModel(BaseTextModel):
         
         return inputs if len(inputs) > 1 else inputs[0]
     
-    def get_output(self, data = None, inputs = None, ** kwargs):
+    def get_output(self, data = None, inputs = None, is_multi = False, ** kwargs):
         if self.output_format:
             if data is None: data = {}
             elif not isinstance(data, (dict, pd.Series)): data = {'text' : data}
+            if is_multi: return self.multi_format_output(** data, ** kwargs)[0]
             return self.format_output(** data, ** kwargs)
         raise NotImplementedError()
     
@@ -341,238 +347,6 @@ class BaseNLUModel(BaseTextModel):
     def filter_data(self, inputs, outputs):
         return self.filter_input(inputs) and self.filter_output(outputs)
     
-    def analyze_last_attention(self,
-                               inputs,
-                               attn_weights,
-                               input_length   = None,
-                               
-                               k      = 10,
-                               attn_name    = None,
-                               reduction  = tf.reduce_sum,
-
-                               skip_eos   = True,
-                               
-                               save   = False,
-                               directory  = None,
-                               filename   = None,
-                               
-                               return_indexes   = False,
-                               return_attention  = False,
-                               
-                               ** kwargs
-                              ):
-        """
-            Analyzes the model's last attention to give some information about it. It has been introduced in the `Memory Augmented Generator : a new approach for question-answering` from @Ananas120 (https://github.com/Ananas120/mag) and seems to be relevant to evaluate the confidence of an answer in Q&A.
-            
-            **Important Note** : this function has been tested for generator models (models that generates text), not yet for other types of models (such as span retriever). 
-            In theory it should work but let me know if there are some issues ;)
-            
-            Arguments :
-                - inputs    : the encoded model's inputs
-                - attn_weights  : either the attention's weights to analyze, either the model's returned dict
-                - input_length  : the inputs' lengths
-                
-                - k     : the top-k scores to analyze
-                - attn_name : if `attn_weights` is a dict, uses `attn_weights[attn_name]` (default to the key with the highest index)
-                - reduction : the function to apply to reduce the heads (default to the sum)
-                - skip_eos  : whether to skip the EOS token's attention or not
-                
-                - save  : whether to save the attention's weights in a `.npy` file
-                - filename / directory  : where to save the attention's weights
-                
-                - return_indexes    : whether to keep the `indexes / values / tokens` keys in the spans' information
-                - return_attention  : whether to return the attention's weights in the infos or not
-            Returns : (global_infos, attn_infos)
-                - global_infos (dict)   : global information about the 1st attention's token (global to each candidate as the 1st output is identical)
-                    - highest_attention_score   : 1st token's highest score
-                    - highest_attention_span_score  : highest span score based on the 1st token's scores
-                    - attention_shape   : the attention shape :D
-                - attn_infos (dict)     : specific candidate's related information about the span's scores etc.
-                    - filename  : where the attention is saved (None if not save)
-                    - indexes / scores / para_indexes   : top-k scores with their indexes and paragraphs' indexes (if `self.multi_input_format`)
-                    - spans : the list of tuple (span_text, span_score, span_infos) where each span_text is a sentence and span_score is the sum of individual token's scores for this span of text
-            
-            See the paper to better understand how to analyze these information and how they can potentially be used to analyze the model's confidence
-        """
-        tokens = inputs
-        if isinstance(inputs, (list, tuple)):
-            flattened, lengths = [], []
-            if self.input_format is not None:
-                inp, inp_len = inputs[:2]
-                flattened.append(inp)
-                lengths.append(inp_len)
-            
-            if self.input_multi_format is not None:
-                multi_inp, multi_lengths = inputs[-2:]
-                multi_inp = [m_inp[:l] for m_inp, l in zip(multi_inp, multi_lengths)]
-                
-                flattened += multi_inp
-                lengths.extend(multi_lengths)
-
-            tokens  = tf.concat(flattened, axis = -1)
-            input_length    = tf.cast(lengths if len(lengths) > 1 else lengths[0], tf.int32)
-            
-            logger.debug('Flattened shape : {} - lengths : {}'.format(
-                tuple(tokens.shape), input_length
-            ))
-
-        time_logger.start_timer('pre-processing')
-        
-        if attn_name is None:
-            use_enc_attn = any(k.startswith('enc_attn') for k in attn_weights.keys())
-            last_idx     = -1
-            for key in attn_weights.keys():
-                if use_enc_attn and not key.startswith('enc_attn'): continue
-                k_idx = int(key.split('_')[-1])
-                if k_idx > last_idx:
-                    attn_name, last_idx = key, k_idx
-        
-        last_attn = attn_weights.get(attn_name, None)
-        if last_attn is None:
-            logger.warning('Attention {} not found in `attn_weights`\n  Accepted : {}'.format(
-                attn_name, tuple(attn_weights.keys())
-            ))
-            time_logger.stop_timer('pre-processing')
-            return {}
-        
-        filename = None
-        if save:
-            if directory is None: directory = os.path.join(self.pred_dir, 'attention')
-            if filename is None:
-                filename = 'attn_{}.npy'.format(len(glob.glob(
-                    os.path.join(directory, 'attn_*.npy')
-                )))
-            filename = os.path.join(directory, filename)
-            np.save(filename, np.array(last_attn))
-        
-        if len(tf.shape(last_attn)) == 4: last_attn = last_attn[0]
-        if len(tf.shape(last_attn)) == 3:
-            logger.debug('Reducing the attention\'s {} heads'.format(tf.shape(last_attn)[0]))
-            last_attn = reduction(last_attn, axis = 0)
-        
-        if skip_eos: last_attn = last_attn[:-1]
-
-        logger.debug('Analyzing attention with shape {}'.format(last_attn.shape))
-
-        time_logger.stop_timer('pre-processing')
-        time_logger.start_timer('Indices extraction')
-        
-        top_k = tf.nn.top_k(last_attn, k = k)
-        indices, values = top_k.indices, top_k.values
-        para_indices = None
-        if input_length is not None and len(tf.shape(input_length)) > 0:
-            if self.subsampling_factor > 1:
-                if not self.subsample_input or self.input_format is None:
-                    indices = indices * self.subsampling_factor
-                else:
-                    inp_len = input_length[0]
-                    indices = inp_len + (indices - inp_len) * self.subsampling_factor
-                indices = tf.clip_by_value(indices, 0, len(tokens) - 1)
-            # compute the paragraphs' indices based on indices
-            mask = tf.cast(tf.math.cumsum(input_length) < tf.reshape(indices, [-1, 1]), tf.int32)
-
-            valids = tf.range(len(input_length)) * tf.expand_dims(mask, axis = 0)
-            valids = valids + (1 - mask) * -1
-
-            para_indices = tf.reshape(tf.reduce_max(valids, axis = -1), tf.shape(indices)).numpy()
-
-        tokens, indices, values = tokens.numpy(), indices.numpy(), values.numpy()
-        
-        logger.debug('Top {} indexes / values for last attention :\n{}\n{}'.format(
-            k, indices, values
-        ))
-        
-        time_logger.stop_timer('Indices extraction')
-        time_logger.start_timer('Post processing')
-
-        total_attn_score_per_token   = tf.reduce_sum(last_attn, axis = -1).numpy()
-        
-        ranges, spans, idx_to_token = {}, {}, {}
-        for i, total_attn in enumerate(total_attn_score_per_token):
-            time_logger.start_timer('attention_i analysis')
-
-            for idx, val in zip(indices[i], values[i]):
-                time_logger.start_timer('index_i analysis')
-                sent = None
-                for (start, end), _sent in ranges.items():
-                    if idx in range(start, end):
-                        sent = _sent
-                        break
-                
-                if sent is None:
-                    time_logger.start_timer('sentence extraction')
-                    
-                    sent, start, end = self.text_encoder.extract_sentence(tokens, idx)
-                    ranges[(start, end)] = sent
-                    
-                    time_logger.stop_timer('sentence extraction')
-
-                _token_idx = tokens[idx]
-                if _token_idx not in idx_to_token:
-                    idx_to_token[_token_idx] = self.text_encoder.decode(
-                        [_token_idx], remove_tokens = False
-                    )
-                
-                spans.setdefault(sent, {
-                    'score' : {}, 'normalized_score' : {}, 'indexes' : {}, 'values' : {}, 'tokens' : {}
-                })
-                spans[sent]['indexes'].setdefault(i, []).append(idx)
-                spans[sent]['values'].setdefault(i, []).append(val)
-                spans[sent]['tokens'].setdefault(i, []).append(idx_to_token[_token_idx])
-                spans[sent]['score'].setdefault(i, 0.)
-                spans[sent]['normalized_score'].setdefault(i, 0.)
-                
-                spans[sent]['score'][i] += val 
-                spans[sent]['normalized_score'][i] += val / total_attn
-                
-                time_logger.stop_timer('index_i analysis')
-
-            time_logger.stop_timer('attention_i analysis')
-        
-        span_infos = []
-        for sent, infos in spans.items():
-            if self.input_format is not None and self.input_multi_format is not None:
-                inp_len = input_length[0]
-                _indexes = []
-                for _, v in infos['indexes'].items(): _indexes.extend(v)
-                infos['is_question'] = all(idx <= inp_len for idx in _indexes)
-            
-            if not return_indexes:
-                for k in ('indexes', 'values', 'tokens'): infos.pop(k)
-            
-            span_infos.append((
-                sent, sum(infos['score'].values()) / len(last_attn), infos
-            ))
-        span_infos = sorted(span_infos, key = lambda i: i[1], reverse = True)
-        
-        #conf = span_infos[0][2]['score'].get(0, 0)
-        conf    = max([
-            infos['score'].get(0, 0) for _, _, infos in span_infos
-        ])
-        
-        time_logger.stop_timer('Post processing')
-
-        global_infos    = {
-            'highest_attention_score'   : np.max(last_attn[0]),
-            'highest_attention_span_score'  : conf,
-            'attention_shape'   : tuple(last_attn.shape)
-        }
-        attn_infos      = {'spans' : span_infos}
-        if filename is not None:
-            attn_infos['filename'] = filename
-        
-        if return_indexes:
-            attn_infos.update({
-                'indexes'   : indices,
-                'scores'    : values,
-                'para_indexes'  : para_indices
-            })
-        
-        if return_attention:
-            attn_infos['attention'] = last_attn
-        
-        return global_infos, attn_infos
-
     def get_config(self, * args, ** kwargs):
         config = super(BaseNLUModel, self).get_config(* args, ** kwargs)
         config.update({

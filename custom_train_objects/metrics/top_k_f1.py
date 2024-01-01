@@ -27,24 +27,13 @@ def cum_argmax(x, axis = -1):
     )[2]
 
 class TopKF1(F1):
-    def __init__(self, k = 5, decode_fn = None, normalize = True, exclude = None,
-                 name = 'F1', ** kwargs):
-        super(F1, self).__init__(name = name)
+    def __init__(self, k = 5, shape = None, name = 'TopKF1', ** kwargs):
+        super().__init__(shape = (k, ), name = name, ** kwargs)
         self.k      = k
-        self.normalize  = normalize
-        self.exclude    = exclude
-        self.decode_fn  = decode_fn
-        
-        self.samples    = self.add_weight("batches", initializer = "zeros", dtype = tf.int32)
-        
-        self.exact_match    = self.add_weight("exact_match",    initializer = "zeros", shape = (k, ))
-        self.precision      = self.add_weight("precision",      initializer = "zeros", shape = (k, ))
-        self.recall         = self.add_weight("recall",         initializer = "zeros", shape = (k, ))
-        self.f1             = self.add_weight("f1",             initializer = "zeros", shape = (k, ))
     
     @property
     def metric_names(self):
-        _names = ["EM", "F1", "precision", "recall"]
+        _names = super().metric_names
         
         metrics = []
         for k in range(1, self.k + 1):
@@ -74,18 +63,11 @@ class TopKF1(F1):
 
         return results
     
-    def reset_state(self):
-        for var in self.variables:
-            var.assign(tf.zeros(shape = var.shape, dtype = var.dtype))
-    
     def result(self):
-        n = tf.cast(self.samples, tf.float32)
-        result = tf.stack([
-            self.exact_match / n, self.f1 / n, self.precision / n, self.recall / n
-        ])
-        return tf.reshape(tf.transpose(result), [-1])
+        return tf.reshape(tf.transpose(tf.stack(super().result())), [-1])
     
     def get_config(self):
-        config = super().get_config()
-        config['k'] = self.k
-        return config
+        return {
+            ** super().get_config(),
+            'k' : self.k
+        }

@@ -12,69 +12,83 @@
 
 import tensorflow as tf
 
+from utils.distance import text_f1
+
 class F1(tf.keras.metrics.Metric):
-    def __init__(self, decode_fn = None, normalize = True, exclude = None, name = 'F1',
-                 ** kwargs):
+    def __init__(self,
+                 decode_fn  = None,
+                 normalize  = True,
+                 exclude    = None,
+                 shape      = (),
+                 name       = 'F1',
+                 ** kwargs
+                ):
         super().__init__(name = name)
         self.normalize  = normalize
         self.exclude    = exclude
         self.decode_fn  = decode_fn
+        self.shape  = shape
         
-        self.samples    = self.add_weight("batches", initializer = "zeros", dtype = tf.int32)
+        self.samples    = self.add_weight("samples", initializer = "zeros", dtype = tf.int32)
         
-        self.exact_match    = self.add_weight("exact_match",    initializer = "zeros")
-        self.precision      = self.add_weight("precision",      initializer = "zeros")
-        self.recall         = self.add_weight("recall",         initializer = "zeros")
-        self.f1             = self.add_weight("f1",             initializer = "zeros")
+        self.exact_match    = self.add_weight("exact_match",    initializer = "zeros", shape = shape)
+        self.precision      = self.add_weight("precision",      initializer = "zeros", shape = shape)
+        self.recall         = self.add_weight("recall",         initializer = "zeros", shape = shape)
+        self.f1             = self.add_weight("f1",             initializer = "zeros", shape = shape)
     
     @property
     def metric_names(self):
         return ["EM", "F1", "precision", "recall"]
     
+    def reset_state(self):
+        for var in self.variables: var.assign(tf.zeros(shape = var.shape, dtype = var.dtype))
+
     def decode(self, data, skip_empty = False):
         if self.decode_fn is not None:
             decoded = self.decode_fn(data)
             if isinstance(decoded[0], list) and skip_empty:
                 last_valid_idx = [
-                    max([i+1 for i, d in enumerate(dec) if len(d) > 0] + [1])
+                    max([i + 1 for i, txt in enumerate(dec) if len(txt) > 0] + [1])
                     for dec in decoded
                 ]
                 decoded = [
-                    dec[:last_valid] for dec, last_valid in zip(decoded, last_valid_idx)
+                    dec[: last_valid] for dec, last_valid in zip(decoded, last_valid_idx)
                 ]
             return decoded
-        return data.numpy()
+        return data
     
     def compute_f1(self, y_true, y_pred):
-        from utils.text import f1_score
-        
-        return f1_score(
-            self.decode(y_true, skip_empty = True), self.decode(y_pred, skip_empty = False),
-            normalize = self.normalize, exclude = self.exclude
+        return text_f1(
+            self.decode(y_true, skip_empty = True),
+            self.decode(y_pred, skip_empty = False),
+            normalize   = self.normalize,
+            exclude     = self.exclude
         )
     
     def tf_compute_f1(self, y_true, y_pred):
-        results = tf.py_function(
+        y_pred = tf.ensure_shape(y_pred, [tf.shape(y_true)[0], None])
+        
+        results = tf.numpy_function(
             self.compute_f1, [y_true, y_pred], Tout = tf.float32
         )
         results = tf.reshape(results, [tf.shape(y_true)[0], -1, 4])
         
-        bests   = tf.expand_dims(tf.argmax(results[:,:,1], axis = 1), axis = 1)
-        results = tf.gather(results, bests[:,0], axis = 1, batch_dims = 1)
+        bests   = tf.argmax(results[:, :, 1], axis = 1)
+        results = tf.gather(results, bests, axis = 1, batch_dims = 1)
 
-        results = tf.reduce_sum(results, axis = 0)
-        
-        return results
+        return tf.reduce_sum(results, axis = 0)
     
     def update_state(self, y_true, y_pred, sample_weight = None):
-        if isinstance(y_true, (list, tuple)): y_true = y_true[0]
-        if hasattr(y_pred, 'tokens'): y_pred = y_pred.tokens
+        if isinstance(y_true, (list, tuple)):   y_true = y_true[0]
+        if hasattr(y_pred, 'tokens'):           y_pred = y_pred.tokens
         
-        if len(tf.shape(y_true)) == 1: y_true = tf.expand_dims(y_true, 0)
-        if len(tf.shape(y_pred)) == 1: y_pred = tf.expand_dims(y_pred, 0)
-        if y_pred.dtype == tf.float32:
-            if len(tf.shape(y_pred)) > 2: y_pred = tf.cast(tf.argmax(y_pred, axis = -1), tf.int32)
-            else: y_pred = tf.cast(y_pred > 0.5, tf.int32)
+        if len(tf.shape(y_true)) == 1: y_true = tf.expand_dims(y_true, axis = 0)
+        if len(tf.shape(y_pred)) == 1: y_pred = tf.expand_dims(y_pred, axis = 0)
+        if y_pred.dtype != tf.int32:
+            if len(tf.shape(y_pred)) > 2:
+                y_pred = tf.argmax(y_pred, axis = -1, output_type = tf.int32)
+            else:
+                y_pred = tf.cast(y_pred > 0.5, tf.int32)
         
         scores = self.tf_compute_f1(y_true, y_pred)
         
@@ -90,7 +104,9 @@ class F1(tf.keras.metrics.Metric):
         return self.exact_match / n, self.f1 / n, self.precision / n, self.recall / n
     
     def get_config(self):
-        config = super().get_config()
-        config['normalize']  = self.normalize
-        config['exclude']    = self.exclude
-        return config
+        return {
+            ** super().get_config(),
+            'normalize' : self.normalize,
+            'exclude'   : self.exclude,
+            'shape'     : self.shape
+        }
